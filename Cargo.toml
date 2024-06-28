@@ -1,0 +1,19 @@
+[package]
+name = "jute-rs"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+path = "src/lib.rs"
+
+[[example]]
+name = "basic"
+path = "example/basic.rs"
+
+[dependencies]
+anyhow = "1.0.86"
+bytes = { version = "1.6.0", features = ["serde"] }
+serde-lite = { path = "./third_party/serde-lite/serde-lite" }
+serde-lite-derive = { path = "./third_party/serde-lite/serde-lite-derive" }
+thiserror = "1.0.61"
+tokio = { version = "1.38.0", features = ["full"] }

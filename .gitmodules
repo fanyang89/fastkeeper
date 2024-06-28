@@ -1,0 +1,3 @@
+[submodule "third_party/serde-lite"]
+	path = third_party/serde-lite
+	url = https://github.com/fanyang89/serde-lite.git
