@@ -1,3 +1,3 @@
 [workspace]
 resolver = "2"
-members = ["jute", "serde-lite/serde-lite", "serde-lite/serde-lite-derive"]
+members = ["jute", "jute-derive", "serde-lite/serde-lite", "serde-lite/serde-lite-derive"]
