@@ -1,0 +1,9 @@
+[package]
+name = "zookeeper-client-rs"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = { version = "1.0.86", features = ["backtrace"] }
+thiserror = "1.0.61"
+tokio = { version = "1.38.0", features = ["full"] }
