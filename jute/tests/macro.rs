@@ -1,8 +1,8 @@
-use jute_rs::Reflect;
+use jute_rs::Jute;
 use std::{collections::HashMap, string};
 
 #[warn(dead_code)]
-#[derive(jute_derive::Reflect)]
+#[derive(jute_derive::Jute)]
 struct Foo {
     field01: bool,
     field02: i32,

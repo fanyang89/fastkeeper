@@ -14,7 +14,7 @@ pub enum FieldType {
     Map(Box<FieldType>), // map, key is string
 }
 
-pub trait Reflect {
+pub trait Jute {
     fn type_name() -> &'static str;
     fn field_types() -> Vec<FieldType>;
 }
