@@ -5,6 +5,35 @@ pub struct Serializer {
     buf: bytes::BytesMut,
 }
 
+trait MaySwapBytes {
+    fn may_swap_bytes(&self) -> Self;
+}
+
+macro_rules! impl_may_swap_bytes {
+    ($x:ident) => {
+        impl MaySwapBytes for $x {
+            #[cfg(target_endian = "little")]
+            fn may_swap_bytes(&self) -> Self {
+                $x::swap_bytes(*self)
+            }
+
+            #[cfg(target_endian = "big")]
+            fn may_swap_bytes(self) -> Self {
+                self
+            }
+        }
+    };
+}
+
+impl_may_swap_bytes!(u16);
+impl_may_swap_bytes!(u32);
+impl_may_swap_bytes!(u64);
+impl_may_swap_bytes!(u128);
+impl_may_swap_bytes!(i16);
+impl_may_swap_bytes!(i32);
+impl_may_swap_bytes!(i64);
+impl_may_swap_bytes!(i128);
+
 impl Serializer {
     pub fn new() -> Self {
         Serializer {
@@ -27,7 +56,9 @@ impl Serializer {
 
     fn visit(&mut self, s: &Intermediate) -> Result<(), anyhow::Error> {
         match s {
-            Intermediate::None => {}
+            Intermediate::None => {
+                todo!()
+            }
 
             Intermediate::Bool(b) => {
                 self.buf.put_u8(if *b { 0x1 } else { 0x0 });
@@ -39,13 +70,15 @@ impl Serializer {
                 serde_lite::Number::I32(v) => self.buf.put_i32(*v),
                 serde_lite::Number::I64(v) => self.buf.put_i64(*v),
                 serde_lite::Number::I128(v) => self.buf.put_i128(*v),
+
                 serde_lite::Number::U8(v) => self.buf.put_u8(*v),
-                serde_lite::Number::U16(v) => self.buf.put_u16(*v),
-                serde_lite::Number::U32(v) => self.buf.put_u32(*v),
-                serde_lite::Number::U64(v) => self.buf.put_u64(*v),
-                serde_lite::Number::U128(v) => self.buf.put_u128(*v),
-                serde_lite::Number::F32(v) => self.buf.put_f32(*v),
-                serde_lite::Number::F64(v) => self.buf.put_f64(*v),
+                serde_lite::Number::U16(v) => self.buf.put_u16(v.may_swap_bytes()),
+                serde_lite::Number::U32(v) => self.buf.put_u32(v.may_swap_bytes()),
+                serde_lite::Number::U64(v) => self.buf.put_u64(v.may_swap_bytes()),
+                serde_lite::Number::U128(v) => self.buf.put_u128(v.may_swap_bytes()),
+
+                serde_lite::Number::F32(v) => self.buf.put_u32(v.to_bits().may_swap_bytes()),
+                serde_lite::Number::F64(v) => self.buf.put_u64(v.to_bits().may_swap_bytes()),
             },
 
             Intermediate::String(s) => {
