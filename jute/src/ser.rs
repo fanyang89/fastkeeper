@@ -102,6 +102,11 @@ impl Serializer {
                     self.visit(v)?;
                 }
             }
+
+            Intermediate::Buffer(b) => {
+                self.buf.put_u32(b.len().try_into()?);
+                self.buf.put_slice(b.as_slice());
+            }
         }
 
         Ok(())
