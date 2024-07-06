@@ -157,6 +157,12 @@ macro_rules! jute_message {
             $($field_name : $field_type,)*
         }
 
+        impl Serialize for $name {
+            fn write_buffer(&self, buf: &mut BytesMut) {
+                $(self.$field_name.write_buffer(buf); )*
+            }
+        }
+
         impl Deserialize for $name {
             fn from_buffer(buf: &mut Bytes) -> Result<Self, anyhow::Error> {
                 Ok($name {
