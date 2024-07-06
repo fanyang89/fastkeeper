@@ -4,7 +4,7 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
-    #[error("End of stream")]
+    #[error("End of buffer")]
     Eof
 }
 
@@ -166,8 +166,3 @@ macro_rules! jute_message {
         }
     }
 }
-
-jute_message!(Id {
-    age: i32,
-    name: String,
-});
