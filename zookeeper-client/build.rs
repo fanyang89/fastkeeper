@@ -6,7 +6,7 @@ fn main() {
     println!("cargo:rerun-if-changed=include/zookeeper.h");
     println!("cargo:rerun-if-changed=src/c.rs");
     Command::new("cbindgen")
-        .args(&[
+        .args([
             "--output",
             "include/zookeeper.h",
             "--lang",

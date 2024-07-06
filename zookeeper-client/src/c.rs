@@ -2,7 +2,6 @@
 
 use crate::messages::data::Stat;
 use crate::{messages, Client};
-use std::convert::Into;
 use std::ffi::{c_char, c_int, c_void, CStr};
 
 /// Creates a new [`CStr`] from a string literal.
@@ -77,7 +76,7 @@ pub const ZOO_PERM_ALL: c_int = 0x1f;
 // > WARN: Can't find CStr. This usually means that this type was incompatible or not found.
 // define this const at cbindgen.toml
 #[no_mangle]
-pub static ZOO_CONFIG_NODE: &'static CStr = c_str!("/zookeeper/config");
+pub static ZOO_CONFIG_NODE: &CStr = c_str!("/zookeeper/config");
 
 pub const ZOO_READONLY: c_int = 1;
 
@@ -88,23 +87,23 @@ pub struct Id {
     id: &'static str,
 }
 
-impl Into<messages::data::Id> for Id {
-    fn into(self) -> messages::data::Id {
+impl From<Id> for messages::data::Id {
+    fn from(val: Id) -> Self {
         messages::data::Id {
-            scheme: self.scheme.to_string(),
-            id: self.id.to_string(),
+            scheme: val.scheme.to_string(),
+            id: val.id.to_string(),
         }
     }
 }
 
 #[no_mangle]
-pub static ZOO_ANYONE_ID_UNSAFE: &'static Id = &Id {
+pub static ZOO_ANYONE_ID_UNSAFE: &Id = &Id {
     scheme: "world",
     id: "anyone",
 };
 
 #[no_mangle]
-pub static ZOO_AUTH_IDS: &'static Id = &Id {
+pub static ZOO_AUTH_IDS: &Id = &Id {
     scheme: "auth",
     id: "",
 };
