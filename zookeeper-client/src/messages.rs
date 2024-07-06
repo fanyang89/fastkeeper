@@ -1,5 +1,5 @@
 // module org.apache.zookeeper.data
-mod data {
+pub mod data {
     use jute::jute_message;
 
     jute_message!(Id {
@@ -42,7 +42,7 @@ mod data {
 }
 
 // module org.apache.zookeeper.proto
-mod proto {
+pub mod proto {
     use super::data::{ClientInfo, Stat, ACL};
     use jute::{jute_message, Buffer, Deserialize, Serialize};
 
@@ -258,7 +258,7 @@ mod proto {
 }
 
 // module org.apache.zookeeper.server.quorum
-mod quorum {
+pub mod quorum {
     use super::data::Id;
     use jute::{jute_message, Buffer};
 
@@ -283,7 +283,7 @@ mod quorum {
 }
 
 // module org.apache.zookeeper.server.persistence
-mod persistence {
+pub mod persistence {
     use jute::jute_message;
 
     jute_message!(FileHeader {
@@ -294,7 +294,7 @@ mod persistence {
 }
 
 // module org.apache.zookeeper.txn
-mod txn {
+pub mod txn {
     use jute::{jute_message, Buffer};
 
     use super::data::ACL;

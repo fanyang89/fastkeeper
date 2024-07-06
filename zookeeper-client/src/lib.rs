@@ -1,4 +1,6 @@
-mod message;
+extern crate core;
+
+mod messages;
 mod c;
 
 use tokio::runtime;

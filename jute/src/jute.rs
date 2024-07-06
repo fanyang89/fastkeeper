@@ -1,16 +1,17 @@
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use std::collections::HashMap;
 use std::hash::Hash;
-use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
     #[error("End of buffer")]
-    Eof
+    Eof,
 }
 
 pub trait Deserialize {
     fn from_buffer(buf: &mut Bytes) -> Result<Self, anyhow::Error>
-        where Self: Sized;
+    where
+        Self: Sized;
 }
 
 impl Deserialize for bool {
@@ -60,7 +61,10 @@ impl Deserialize for String {
     }
 }
 
-impl<T> Deserialize for Vec<T> where T: Deserialize {
+impl<T> Deserialize for Vec<T>
+where
+    T: Deserialize,
+{
     fn from_buffer(buf: &mut Bytes) -> Result<Self, anyhow::Error> {
         let size: usize = i32::from_buffer(buf)? as usize;
         let mut b = Vec::new();
@@ -132,7 +136,10 @@ impl Serialize for String {
     }
 }
 
-impl<T> Serialize for Vec<T> where T: Serialize {
+impl<T> Serialize for Vec<T>
+where
+    T: Serialize,
+{
     fn write_buffer(&self, buf: &mut BytesMut) {
         buf.put_i32(self.len() as i32);
         for it in self.iter() {
@@ -153,19 +160,19 @@ impl<K: Serialize, V: Serialize> Serialize for HashMap<K, V> {
 
 #[macro_export]
 macro_rules! jute_message {
-    ( $name:ident { $( $field_name:ident : $field_type:ty ,)* }) => {
-        struct $name {
-            $($field_name : $field_type,)*
+    ( $name:ident { $( $field_name:ident : $field_type:ty $(,)?)* }) => {
+        pub struct $name {
+            $( pub $field_name : $field_type,)*
         }
 
-        impl Serialize for $name {
-            fn write_buffer(&self, buf: &mut BytesMut) {
+        impl jute::Serialize for $name {
+            fn write_buffer(&self, buf: &mut jute::BytesMut) {
                 $(self.$field_name.write_buffer(buf); )*
             }
         }
 
-        impl Deserialize for $name {
-            fn from_buffer(buf: &mut Bytes) -> Result<Self, anyhow::Error> {
+        impl jute::Deserialize for $name {
+            fn from_buffer(buf: &mut jute::Bytes) -> Result<Self, anyhow::Error> {
                 Ok($name {
                     $($field_name : <$field_type>::from_buffer(buf)?, )*
                 })
