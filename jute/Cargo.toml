@@ -6,12 +6,7 @@ edition = "2021"
 [lib]
 path = "src/lib.rs"
 
-[[example]]
-name = "basic"
-path = "example/basic.rs"
-
 [dependencies]
 anyhow = "1.0.86"
 bytes = { version = "1.6.0", features = ["serde"] }
-num-traits = { version = "0.2.19", features = ["i128"] }
 thiserror = "1.0.61"

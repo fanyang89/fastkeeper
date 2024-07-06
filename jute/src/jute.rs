@@ -151,6 +151,7 @@ impl<K: Serialize, V: Serialize> Serialize for HashMap<K, V> {
     }
 }
 
+#[macro_export]
 macro_rules! jute_message {
     ( $name:ident { $( $field_name:ident : $field_type:ty ,)* }) => {
         struct $name {
