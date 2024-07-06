@@ -1,6 +1,6 @@
 #![allow(nonstandard_style)]
 
-use crate::messages::data::{ACL, Stat};
+use crate::messages::data::Stat;
 use crate::{messages, Client};
 use std::convert::Into;
 use std::ffi::{c_char, c_int, c_void, CStr};
