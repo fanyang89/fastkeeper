@@ -37,46 +37,46 @@ pub mod data {
 
     jute_message!(ClientInfo {
         auth_scheme: String, // Authentication scheme
-        user: String,        // user name or any other id(for example ip)
+        user: String,        // username or any other id(for example ip)
     });
 }
 
 // module org.apache.zookeeper.proto
 pub mod proto {
     use super::data::{ClientInfo, Stat, ACL};
-    use jute::{jute_message, Buffer, Deserialize, Serialize};
+    use jute::{jute_message, Buffer};
 
     jute_message!(ConnectRequest {
         protocol_version: i32,
-        lastZxidSeen: i64,
-        timeOut: i32,
-        sessionId: i64,
+        last_zxid_seen: i64,
+        time_out: i32,
+        session_id: i64,
         passwd: Buffer,
-        readOnly: bool,
+        read_only: bool,
     });
 
     jute_message!(ConnectResponse {
-        protocolVersion: i32,
-        timeOut: i32,
-        sessionId: i64,
+        protocol_version: i32,
+        timeout: i32,
+        session_id: i64,
         passwd: Buffer,
-        readOnly: bool,
+        read_only: bool,
     });
 
     jute_message!(SetWatches {
-        relativeZxid: i64,
-        dataWatches: Vec<String>,
-        existWatches: Vec<String>,
-        childWatches: Vec<String>,
+        relative_zxid: i64,
+        data_watches: Vec<String>,
+        exist_watches: Vec<String>,
+        child_watches: Vec<String>,
     });
 
     jute_message!(SetWatches2 {
-        relativeZxid: i64,
-        dataWatches: Vec<String>,
-        existWatches: Vec<String>,
-        childWatches: Vec<String>,
-        persistentWatches: Vec<String>,
-        persistentRecursiveWatches: Vec<String>,
+        relative_zxid: i64,
+        data_watches: Vec<String>,
+        exist_watches: Vec<String>,
+        child_watches: Vec<String>,
+        persistent_watches: Vec<String>,
+        persistent_recursive_watches: Vec<String>,
     });
 
     jute_message!(RequestHeader {
@@ -114,10 +114,10 @@ pub mod proto {
     });
 
     jute_message!(ReconfigRequest {
-        joiningServers: String,
-        leavingServers: String,
-        newMembers: String,
-        curConfigId: i64,
+        joining_servers: String,
+        leaving_servers: String,
+        new_members: String,
+        cur_config_id: i64,
     });
 
     jute_message!(SetDataResponse { stat: Stat });
@@ -224,7 +224,7 @@ pub mod proto {
          children: Vec<String>,
     });
 
-    jute_message!(GetAllChildrenNumberResponse { totalNumber: i32 });
+    jute_message!(GetAllChildrenNumberResponse { total_number: i32 });
 
     jute_message!(GetChildren2Response {
          children: Vec<String>,
@@ -246,14 +246,16 @@ pub mod proto {
         r#type: i32,
     });
 
-    jute_message!(GetEphemeralsRequest { prefixPath: String });
+    jute_message!(GetEphemeralsRequest {
+        prefix_path: String
+    });
 
     jute_message!(GetEphemeralsResponse {
          ephemerals: Vec<String>,
     });
 
     jute_message!(WhoAmIResponse {
-         clientInfo: Vec<ClientInfo>,
+         client_info: Vec<ClientInfo>,
     });
 }
 
@@ -263,9 +265,9 @@ pub mod quorum {
     use jute::{jute_message, Buffer};
 
     jute_message!(LearnerInfo {
-        serverid: i64,
-        protocolVersion: i32,
-        configVersion: i64,
+        server_id: i64,
+        protocol_version: i32,
+        config_version: i64,
     });
 
     jute_message!(QuorumPacket {
@@ -301,11 +303,11 @@ pub mod txn {
 
     jute_message!(TxnDigest {
         version: i32,
-        treeDigest: i64,
+        tree_digest: i64,
     });
 
     jute_message!(TxnHeader {
-        clientId: i64,
+        client_id: i64,
         cxid: i32,
         zxid: i64,
         time: i64,
@@ -324,22 +326,22 @@ pub mod txn {
         data: Buffer,
         acl: Vec<ACL>,
         ephemeral: bool,
-        parentCVersion: i32,
+        parent_cversion: i32,
     });
 
     jute_message!(CreateTTLTxn {
         path: String,
         data: Buffer,
-         acl: Vec<ACL>,
-        parentCVersion: i32,
+        acl: Vec<ACL>,
+        parent_cversion: i32,
         ttl: i64,
     });
 
     jute_message!(CreateContainerTxn {
         path: String,
         data: Buffer,
-         acl: Vec<ACL>,
-        parentCVersion: i32,
+        acl: Vec<ACL>,
+        parent_cversion: i32,
     });
 
     jute_message!(DeleteTxn { path: String });
@@ -366,10 +368,10 @@ pub mod txn {
         max: i32,
     });
 
-    jute_message!(CreateSessionTxn { timeOut: i32 });
+    jute_message!(CreateSessionTxn { timeout: i32 });
 
     jute_message!(CloseSessionTxn {
-        paths2Delete: Vec<String>,
+        paths2delete: Vec<String>,
     });
 
     jute_message!(ErrorTxn { err: i32 });

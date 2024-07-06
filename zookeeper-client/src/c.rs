@@ -19,6 +19,7 @@ macro_rules! c_str {
     }};
 }
 
+#[no_mangle]
 pub enum ZOO_ERRORS {
     ZOK = 0,
     ZSYSTEMERROR = -1,
