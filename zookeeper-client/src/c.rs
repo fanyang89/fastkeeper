@@ -1,7 +1,7 @@
 #![allow(nonstandard_style)]
 
 use crate::messages::data::Stat;
-use crate::{messages, Client};
+use crate::{client, messages};
 use std::ffi::{c_char, c_int, c_void, CStr};
 
 /// Creates a new [`CStr`] from a string literal.
@@ -149,7 +149,7 @@ pub const ZOO_NOTWATCHING_EVENT: i32 = -2;
 // TODO zoo_op
 
 pub struct zhandle_t {
-    client: Client,
+    client: client::Client,
 }
 
 pub struct clientid_t {
