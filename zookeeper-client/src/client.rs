@@ -1,4 +1,6 @@
 use crate::host_provider::HostProvider;
+use anyhow::anyhow;
+use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio::task::JoinHandle;
 use tokio::{runtime, select, task};
@@ -23,10 +25,11 @@ pub enum ShuffleMode {
 
 pub struct Config {
     pub shuffle_mode: ShuffleMode,
+    pub connect_timeout: Duration,
 }
 
 impl Client {
-    pub fn new(hosts: Vec<String>) -> Self {
+    pub fn new(hosts: Vec<String>, config: Config) -> Self {
         let runtime = runtime::Builder::new_multi_thread()
             .worker_threads(1)
             .max_blocking_threads(1)
@@ -35,30 +38,53 @@ impl Client {
             .unwrap();
 
         let token = CancellationToken::new();
-        let token2 = token.clone();
         let host_provider = HostProvider::new(hosts, true);
-        let main_task = task::spawn(async move {
-            let state = State::Connecting;
-            loop {
-                select! {
-                    _ = token.cancelled() => {
-                        break;
-                    },
-
-                    else => {
-                        match state {
-                            State::Connecting => {}
-                            State::Connected => {}
-                        }
-                    }
-                }
-            }
-        });
+        let main_task = task::spawn(Client::do_io(token.clone(), host_provider, config));
 
         Client {
             runtime,
             main_task,
-            token: token2,
+            token,
+        }
+    }
+}
+
+impl Client {
+    async fn connect_timeout(host: String, timeout: Duration) -> Result<TcpStream, anyhow::Error> {
+        match tokio::time::timeout(timeout, TcpStream::connect(host)).await {
+            Ok(s) => match s {
+                Ok(stream) => Ok(stream),
+                Err(e) => Err(e.into()),
+            },
+            Err(_) => Err(anyhow!("connect timeout after {}ms", timeout.as_millis())),
+        }
+    }
+
+    async fn do_io(token: CancellationToken, mut hosts: HostProvider, config: Config) {
+        let mut state = State::Connecting;
+
+        loop {
+            select! {
+                _ = token.cancelled() => {
+                    break;
+                },
+
+                else => {
+                    match state {
+                        State::Connecting => {
+                            let host = hosts.next().unwrap();
+                            match Client::connect_timeout(host, config.connect_timeout).await {
+                                Ok(_) => {
+                                    state = State::Connected;
+                                }
+                                Err(_) => {}
+                            }
+                        }
+
+                        State::Connected => {}
+                    }
+                }
+            }
         }
     }
 }
