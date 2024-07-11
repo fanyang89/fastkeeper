@@ -1,47 +1,73 @@
-use rand::prelude::SliceRandom;
-use tokio::runtime;
+use crate::host_provider::HostProvider;
+use tokio::net::TcpStream;
+use tokio::task::JoinHandle;
+use tokio::{runtime, select, task};
+use tokio_util::sync::CancellationToken;
 
 pub struct Client {
     runtime: runtime::Runtime,
-    hosts: HostProvider,
+    token: CancellationToken,
+    main_task: JoinHandle<()>,
 }
 
-pub struct HostProvider {
-    hosts: Vec<String>,
-    next: usize,
+pub enum State {
+    Connecting,
+    Connected,
 }
 
-impl HostProvider {
-    pub fn new(mut hosts: Vec<String>) -> Self {
-        hosts.shuffle(&mut rand::thread_rng());
-        Self { hosts, next: 0 }
-    }
-
-    pub fn resolve(&mut self) {}
+pub enum ShuffleMode {
+    Disable,
+    Enable,
+    Once,
 }
 
-impl Iterator for HostProvider {
-    type Item = String;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        todo!()
-    }
+pub struct Config {
+    pub shuffle_mode: ShuffleMode,
 }
 
 impl Client {
     pub fn new(hosts: Vec<String>) -> Self {
-        let client = Client {
-            runtime: runtime::Builder::new_multi_thread()
-                .worker_threads(1)
-                .max_blocking_threads(1)
-                .enable_all()
-                .build()
-                .unwrap(),
-            hosts: HostProvider::new(hosts),
-        };
-        client.connect();
-        client
-    }
+        let runtime = runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .max_blocking_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
 
-    fn connect(&self) {}
+        let token = CancellationToken::new();
+        let token2 = token.clone();
+        let host_provider = HostProvider::new(hosts, true);
+        let main_task = task::spawn(async move {
+            let state = State::Connecting;
+            loop {
+                select! {
+                    _ = token.cancelled() => {
+                        break;
+                    },
+
+                    else => {
+                        match state {
+                            State::Connecting => {}
+                            State::Connected => {}
+                        }
+                    }
+                }
+            }
+        });
+
+        Client {
+            runtime,
+            main_task,
+            token: token2,
+        }
+    }
+}
+
+impl Drop for Client {
+    fn drop(&mut self) {
+        self.token.cancel();
+        task::block_in_place(|| {
+            self.runtime.handle().block_on(&mut self.main_task).unwrap();
+        })
+    }
 }

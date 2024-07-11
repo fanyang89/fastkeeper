@@ -12,13 +12,14 @@ path = "example/basic.rs"
 
 [dependencies]
 anyhow = { version = "1.0.86", features = ["backtrace"] }
+bytes = "1.6.0"
+jute = { path = "../jute" }
+rand = "0.8.5"
 thiserror = "1.0.61"
-tokio = { version = "1.38.0", features = ["net", "rt", "rt-multi-thread", "tokio-macros"] }
+tokio = { version = "1.38.0", features = ["macros", "net", "rt", "rt-multi-thread"] }
+tokio-util = "0.7.11"
 tracing = "0.1.40"
 tracing-subscriber = "0.3.18"
-jute = { path = "../jute" }
-bytes = "1.6.0"
-rand = "0.8.5"
 
 [build-dependencies]
 cbindgen = "0.26.0"
