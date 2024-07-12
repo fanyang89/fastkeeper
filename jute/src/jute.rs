@@ -92,6 +92,10 @@ pub trait Serialize {
     fn write_buffer(&self, buf: &mut BytesMut);
 }
 
+pub trait SerializeToBuffer {
+    fn to_buffer(&self) -> BytesMut;
+}
+
 impl Serialize for bool {
     fn write_buffer(&self, buf: &mut BytesMut) {
         buf.put_u8(if *self { 1 } else { 0 });
@@ -171,6 +175,14 @@ macro_rules! jute_message {
             }
         }
 
+        impl jute::SerializeToBuffer for $name {
+            fn to_buffer(&self) -> jute::BytesMut {
+                let mut buf = bytes::BytesMut::with_capacity(size_of::<$name>());
+                jute::Serialize::write_buffer(self, &mut buf);
+                buf
+            }
+        }
+
         impl jute::Deserialize for $name {
             fn from_buffer(buf: &mut jute::Bytes) -> Result<Self, anyhow::Error> {
                 Ok($name {
@@ -180,3 +192,5 @@ macro_rules! jute_message {
         }
     }
 }
+
+

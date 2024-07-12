@@ -1,5 +1,7 @@
 use crate::host_provider::HostProvider;
+use crate::messages::proto::{AuthPacket, ConnectRequest};
 use anyhow::anyhow;
+use jute::Serialize;
 use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio::task::JoinHandle;
@@ -60,8 +62,27 @@ impl Client {
         }
     }
 
+    async fn prime_connection(
+        conn: TcpStream,
+        session_timeout: Duration,
+    ) -> Result<(), anyhow::Error> {
+        let req = ConnectRequest {
+            protocol_version: 0, // version 0
+            last_zxid_seen: 0,
+            time_out: session_timeout.as_millis() as i32,
+            session_id: todo!(),
+            passwd: todo!(),
+            read_only: todo!(),
+        };
+        let mut buf = bytes::BytesMut::with_capacity(size_of::<ConnectRequest>());
+        req.write_buffer(&mut buf);
+        conn.try_write(buf.as_ref())?;
+        todo!()
+    }
+
     async fn do_io(token: CancellationToken, mut hosts: HostProvider, config: Config) {
         let mut state = State::Connecting;
+        let mut conn: Option<TcpStream> = None;
 
         loop {
             select! {
@@ -74,8 +95,9 @@ impl Client {
                         State::Connecting => {
                             let host = hosts.next().unwrap();
                             match Client::connect_timeout(host, config.connect_timeout).await {
-                                Ok(_) => {
+                                Ok(s) => {
                                     state = State::Connected;
+                                    conn = Some(s);
                                 }
                                 Err(_) => {}
                             }
