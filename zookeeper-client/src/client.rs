@@ -1,17 +1,39 @@
-use crate::host_provider::HostProvider;
-use crate::messages::proto::{AuthPacket, ConnectRequest};
-use anyhow::anyhow;
-use jute::Serialize;
+use std::io;
 use std::time::Duration;
+
+use anyhow::anyhow;
+use byteorder::{BigEndian, ReadBytesExt};
+use bytes::Bytes;
+use tokio::io::AsyncReadExt;
 use tokio::net::TcpStream;
-use tokio::task::JoinHandle;
+use tokio::sync::mpsc;
+use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::task::{JoinHandle, JoinSet};
+use tokio::time::Instant;
 use tokio::{runtime, select, task};
 use tokio_util::sync::CancellationToken;
+use tracing::{info, warn};
+
+use jute::{Deserialize, Serialize, SerializeToBuffer};
+
+use crate::host_provider::HostProvider;
+use crate::messages::proto::ConnectRequest;
 
 pub struct Client {
     runtime: runtime::Runtime,
     token: CancellationToken,
-    main_task: JoinHandle<()>,
+    tasks: JoinSet<()>,
+    completion_tx: mpsc::UnboundedSender<CompletionCb>,
+    send_tx: mpsc::UnboundedSender<Request>,
+    recv_tx: mpsc::UnboundedSender<Response>,
+}
+
+struct Request {
+    payload: Box<dyn SerializeToBuffer>,
+}
+
+struct Response {
+    payload: Box<dyn Deserialize>,
 }
 
 pub enum State {
@@ -19,16 +41,29 @@ pub enum State {
     Connected,
 }
 
+pub enum SessionEvent {
+    Connected,    // state: Connecting -> Connected,
+    Disconnected, // state: Connected -> Connecting,
+    AuthFailed,   // state: Connecting -> AuthFailed,
+}
+
+pub enum EventType {}
+
+#[derive(Clone, Debug)]
 pub enum ShuffleMode {
     Disable,
     Enable,
     Once,
 }
 
+#[derive(Clone, Debug)]
 pub struct Config {
     pub shuffle_mode: ShuffleMode,
     pub connect_timeout: Duration,
+    pub completion_warn_timeout: Duration,
 }
+
+pub type CompletionCb = dyn FnOnce(EventType, State, String); // type, state, path
 
 impl Client {
     pub fn new(hosts: Vec<String>, config: Config) -> Self {
@@ -40,19 +75,40 @@ impl Client {
             .unwrap();
 
         let token = CancellationToken::new();
-        let host_provider = HostProvider::new(hosts, true);
-        let main_task = task::spawn(Client::do_io(token.clone(), host_provider, config));
+        let mut tasks = JoinSet::new();
+        let (completion_tx, completion_rx) = mpsc::unbounded_channel::<CompletionCb>();
+        tasks.spawn_blocking(Client::task_completion(token.clone(), completion_rx));
+
+        let (send_tx, send_rx) = mpsc::unbounded_channel::<Request>();
+        let (recv_tx, recv_rx) = mpsc::unbounded_channel::<Response>();
+        tasks.spawn_blocking(Client::task_io(
+            token.clone(),
+            HostProvider::new(hosts, true),
+            send_rx,
+            recv_rx,
+            config.clone(),
+        ));
 
         Client {
             runtime,
-            main_task,
             token,
+            tasks,
+            completion_tx,
+            recv_tx,
+            send_tx,
         }
     }
 }
 
+impl Drop for Client {
+    fn drop(&mut self) {
+        self.token.cancel();
+        task::block_in_place(async { while let _ = self.tasks.join_next().await {} })
+    }
+}
+
 impl Client {
-    async fn connect_timeout(host: String, timeout: Duration) -> Result<TcpStream, anyhow::Error> {
+    async fn connect_timeout(host: &String, timeout: Duration) -> Result<TcpStream, anyhow::Error> {
         match tokio::time::timeout(timeout, TcpStream::connect(host)).await {
             Ok(s) => match s {
                 Ok(stream) => Ok(stream),
@@ -80,10 +136,7 @@ impl Client {
         todo!()
     }
 
-    async fn do_io(token: CancellationToken, mut hosts: HostProvider, config: Config) {
-        let mut state = State::Connecting;
-        let mut conn: Option<TcpStream> = None;
-
+    async fn task_completion(token: CancellationToken, mut rx: UnboundedReceiver<CompletionCb>) {
         loop {
             select! {
                 _ = token.cancelled() => {
@@ -91,31 +144,80 @@ impl Client {
                 },
 
                 else => {
-                    match state {
-                        State::Connecting => {
-                            let host = hosts.next().unwrap();
-                            match Client::connect_timeout(host, config.connect_timeout).await {
-                                Ok(s) => {
-                                    state = State::Connected;
-                                    conn = Some(s);
-                                }
-                                Err(_) => {}
-                            }
+                    while let Some(cb) = rx.recv().await {
+                        let now = Instant::now();
+                        cb();
+                        let elapsed = Instant::now() - now;
+                        if elapsed > Duration::from_secs(1) {
+                            warn!("Detected slow callback execution");
                         }
-
-                        State::Connected => {}
                     }
                 }
             }
         }
+
+        info!("Completion task exited");
+    }
+
+    // io task
+    async fn task_io(
+        token: CancellationToken,
+        mut host_provider: HostProvider,
+        mut to_send: UnboundedReceiver<Request>,
+        to_recv: UnboundedReceiver<Response>,
+        config: Config,
+    ) {
+        let Config {
+            connect_timeout, ..
+        } = config;
+        let mut conn: Option<TcpStream> = None;
+
+        loop {
+            // try connect
+            let host = host_provider.next().unwrap();
+            match Client::connect_timeout(&host, connect_timeout).await {
+                Ok(mut conn) => {
+                    // prime connect request
+
+                    // do io
+
+                    let mut size_buf = [0u8; 4];
+
+                    loop {
+                        select! {
+                            _ = token.cancelled() => {
+                                break;
+                            },
+
+                            Some(req) = to_send.recv() => {
+                                let buf = req.payload.to_buffer().freeze();
+                            },
+
+                            rsp = conn.try_read(&mut size_buf) => {
+                                let size = read_u32(&size_buf);
+                                let buf = read_buffer(&mut conn, size);
+                                // TODO: response type dispatch, deserialize
+                            },
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!("Connect to {} failed, error: {}", host, e);
+                }
+            }
+        }
+
+        info!("IO task exited");
     }
 }
 
-impl Drop for Client {
-    fn drop(&mut self) {
-        self.token.cancel();
-        task::block_in_place(|| {
-            self.runtime.handle().block_on(&mut self.main_task).unwrap();
-        })
-    }
+fn read_u32(buf: &[u8; 4]) -> u32 {
+    let mut cursor = io::Cursor::new(buf);
+    cursor.read_u32::<BigEndian>().unwrap()
+}
+
+async fn read_buffer(mut conn: &mut TcpStream, len: u32) -> Result<Bytes, io::Error> {
+    let mut buf = bytes::BytesMut::with_capacity(len as usize);
+    conn.read_exact(&mut buf).await?;
+    Ok(buf.freeze())
 }
