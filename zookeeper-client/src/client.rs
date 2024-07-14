@@ -2,7 +2,7 @@ use std::io;
 use std::time::Duration;
 
 use anyhow::anyhow;
-use byteorder::{BigEndian, ReadBytesExt};
+use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use bytes::Bytes;
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpStream;
@@ -23,7 +23,7 @@ pub struct Client {
     runtime: runtime::Runtime,
     token: CancellationToken,
     tasks: JoinSet<()>,
-    completion_tx: mpsc::UnboundedSender<CompletionCb>,
+    completion_tx: mpsc::UnboundedSender<Box<CompletionCb>>,
     send_tx: mpsc::UnboundedSender<Request>,
     recv_tx: mpsc::UnboundedSender<Response>,
 }
@@ -47,7 +47,9 @@ pub enum SessionEvent {
     AuthFailed,   // state: Connecting -> AuthFailed,
 }
 
-pub enum EventType {}
+pub enum EventType {
+    Session,
+}
 
 #[derive(Clone, Debug)]
 pub enum ShuffleMode {
@@ -76,18 +78,22 @@ impl Client {
 
         let token = CancellationToken::new();
         let mut tasks = JoinSet::new();
-        let (completion_tx, completion_rx) = mpsc::unbounded_channel::<CompletionCb>();
-        tasks.spawn_blocking(Client::task_completion(token.clone(), completion_rx));
+        let (completion_tx, completion_rx) = mpsc::unbounded_channel::<Box<CompletionCb>>();
+        tasks.spawn_blocking(async || {
+            Client::task_completion(token.clone(), completion_rx).await;
+        });
 
         let (send_tx, send_rx) = mpsc::unbounded_channel::<Request>();
         let (recv_tx, recv_rx) = mpsc::unbounded_channel::<Response>();
-        tasks.spawn_blocking(Client::task_io(
-            token.clone(),
-            HostProvider::new(hosts, true),
-            send_rx,
-            recv_rx,
-            config.clone(),
-        ));
+        tasks.spawn_blocking(async || {
+            Client::task_io(
+                token.clone(),
+                HostProvider::new(hosts, true),
+                send_rx,
+                recv_rx,
+                config.clone(),
+            ).await;
+        });
 
         Client {
             runtime,
@@ -136,7 +142,10 @@ impl Client {
         todo!()
     }
 
-    async fn task_completion(token: CancellationToken, mut rx: UnboundedReceiver<CompletionCb>) {
+    async fn task_completion(
+        token: CancellationToken,
+        mut rx: UnboundedReceiver<Box<CompletionCb>>,
+    ) {
         loop {
             select! {
                 _ = token.cancelled() => {
@@ -146,7 +155,7 @@ impl Client {
                 else => {
                     while let Some(cb) = rx.recv().await {
                         let now = Instant::now();
-                        cb();
+                        cb(EventType::Session, State::Connecting, "".to_string());
                         let elapsed = Instant::now() - now;
                         if elapsed > Duration::from_secs(1) {
                             warn!("Detected slow callback execution");
@@ -170,7 +179,7 @@ impl Client {
         let Config {
             connect_timeout, ..
         } = config;
-        let mut conn: Option<TcpStream> = None;
+        let conn: Option<TcpStream> = None;
 
         loop {
             // try connect
@@ -185,19 +194,26 @@ impl Client {
 
                     loop {
                         select! {
-                            _ = token.cancelled() => {
-                                break;
-                            },
+                            biased;
 
                             Some(req) = to_send.recv() => {
                                 let buf = req.payload.to_buffer().freeze();
-                            },
+                                let size = buf.len() as u32;
+                                let mut size_buf = Vec::new();
+                                size_buf.write_u32::<BigEndian>(size).unwrap();
+                                conn.try_write(&size_buf).await;
+                                conn.try_write(&buf).await;
+                            }
 
                             rsp = conn.try_read(&mut size_buf) => {
                                 let size = read_u32(&size_buf);
                                 let buf = read_buffer(&mut conn, size);
                                 // TODO: response type dispatch, deserialize
-                            },
+                            }
+
+                            _ = token.cancelled() => {
+                                break;
+                            }
                         }
                     }
                 }
