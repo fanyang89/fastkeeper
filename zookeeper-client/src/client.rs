@@ -1,7 +1,8 @@
+use std::future::Future;
 use std::io;
 use std::time::Duration;
 
-use anyhow::anyhow;
+use anyhow::{anyhow, Error};
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use bytes::{BufMut, Bytes, BytesMut};
 use tokio::io::AsyncReadExt;
@@ -9,7 +10,8 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::task::{JoinHandle, JoinSet};
-use tokio::time::{sleep, Instant};
+use tokio::time::error::Elapsed;
+use tokio::time::{sleep, Instant, Timeout};
 use tokio::{runtime, select, task};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
@@ -274,12 +276,23 @@ impl Client {
                                 interest = IOInterest::Write;
                             }
 
-                            IOInterest::Read => match Self::do_read(&mut conn).await {
-                                Ok(_) => {
-                                    interest = IOInterest::Write;
-                                }
+                            IOInterest::Read => match tokio::time::timeout(
+                                session_timeout / 3 * 2,
+                                Self::do_read(&mut conn),
+                            )
+                            .await
+                            {
+                                Ok(r) => match r {
+                                    Ok(_) => {
+                                        interest = IOInterest::Write;
+                                    }
+                                    Err(e) => {
+                                        error!("Read failed, {}", e);
+                                        interest = IOInterest::Reconnect;
+                                    }
+                                },
                                 Err(e) => {
-                                    error!("Read failed, {}", e);
+                                    error!("Read timeout, {}", e);
                                     interest = IOInterest::Reconnect;
                                 }
                             },
