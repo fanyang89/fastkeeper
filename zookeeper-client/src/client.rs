@@ -3,16 +3,16 @@ use std::time::Duration;
 
 use anyhow::anyhow;
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
-use bytes::Bytes;
+use bytes::{BufMut, Bytes, BytesMut};
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::task::{JoinHandle, JoinSet};
-use tokio::time::Instant;
+use tokio::time::{sleep, Instant};
 use tokio::{runtime, select, task};
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use jute::{Deserialize, Serialize, SerializeToBuffer};
 
@@ -30,6 +30,17 @@ pub struct Client {
 
 struct Request {
     payload: Box<dyn SerializeToBuffer>,
+}
+
+impl SerializeToBuffer for Request {
+    fn to_buffer(&self) -> BytesMut {
+        let mut b = BytesMut::new();
+        let buf = self.payload.to_buffer().freeze();
+        let size = buf.len() as u32;
+        b.put_u32(size);
+        b.put(buf);
+        b
+    }
 }
 
 struct Response {
@@ -63,6 +74,17 @@ pub struct Config {
     pub shuffle_mode: ShuffleMode,
     pub connect_timeout: Duration,
     pub completion_warn_timeout: Duration,
+    pub session_timeout: Duration,
+    pub read_only: bool,
+}
+
+#[derive(Clone, Debug)]
+pub enum IOInterest {
+    Read,
+    Write,
+    PrimeConnect,
+    PrimeConnectResponse,
+    Reconnect,
 }
 
 pub type CompletionCb = dyn FnOnce(EventType, State, String); // type, state, path
@@ -92,7 +114,8 @@ impl Client {
                 send_rx,
                 recv_rx,
                 config.clone(),
-            ).await;
+            )
+            .await;
         });
 
         Client {
@@ -125,18 +148,26 @@ impl Client {
     }
 
     async fn prime_connection(
-        conn: TcpStream,
-        session_timeout: Duration,
+        conn: &TcpStream,
+        last_zxid: i64,
+        session_id: i64,
+        passwd: &jute::Buffer,
+        config: Config,
     ) -> Result<(), anyhow::Error> {
+        let Config {
+            session_timeout,
+            read_only,
+            ..
+        } = config;
         let req = ConnectRequest {
             protocol_version: 0, // version 0
-            last_zxid_seen: 0,
+            last_zxid_seen: last_zxid,
             time_out: session_timeout.as_millis() as i32,
-            session_id: todo!(),
-            passwd: todo!(),
-            read_only: todo!(),
+            session_id,
+            passwd: passwd.clone(),
+            read_only,
         };
-        let mut buf = bytes::BytesMut::with_capacity(size_of::<ConnectRequest>());
+        let mut buf = BytesMut::with_capacity(size_of::<ConnectRequest>());
         req.write_buffer(&mut buf);
         conn.try_write(buf.as_ref())?;
         todo!()
@@ -158,7 +189,7 @@ impl Client {
                         cb(EventType::Session, State::Connecting, "".to_string());
                         let elapsed = Instant::now() - now;
                         if elapsed > Duration::from_secs(1) {
-                            warn!("Detected slow callback execution");
+                            warn!("Slow callback execution detected");
                         }
                     }
                 }
@@ -166,6 +197,27 @@ impl Client {
         }
 
         info!("Completion task exited");
+    }
+
+    async fn do_read(mut conn: &mut TcpStream) -> Result<(), anyhow::Error> {
+        loop {
+            if !conn.readable() {
+                break;
+            }
+            let mut size_buf = [0u8; 4];
+            match conn.read_exact(&mut size_buf).await {
+                Ok(_) => {
+                    let mut cursor = io::Cursor::new(size_buf);
+                    let size = cursor.read_u32::<BigEndian>().unwrap();
+                    let mut buf = BytesMut::with_capacity(size as usize);
+                    conn.read_exact(&mut buf).await?;
+                    let b = buf.freeze();
+                }
+                Err(_) => {}
+            }
+            // TODO: response type dispatch, deserialize
+        }
+        Ok(())
     }
 
     // io task
@@ -177,63 +229,86 @@ impl Client {
         config: Config,
     ) {
         let Config {
-            connect_timeout, ..
+            connect_timeout,
+            session_timeout,
+            ..
         } = config;
-        let conn: Option<TcpStream> = None;
+        let mut interest = IOInterest::PrimeConnect;
+        let mut last_zxid: i64 = 0;
+        let mut session_id: i64 = 0;
+        let mut passwd: jute::Buffer = Vec::with_capacity(16);
 
         loop {
             // try connect
             let host = host_provider.next().unwrap();
+            let connect_start = Instant::now();
+            info!("Connecting to {}", host);
             match Client::connect_timeout(&host, connect_timeout).await {
                 Ok(mut conn) => {
-                    // prime connect request
-
-                    // do io
-
-                    let mut size_buf = [0u8; 4];
-
-                    loop {
-                        select! {
-                            biased;
-
-                            Some(req) = to_send.recv() => {
-                                let buf = req.payload.to_buffer().freeze();
-                                let size = buf.len() as u32;
-                                let mut size_buf = Vec::new();
-                                size_buf.write_u32::<BigEndian>(size).unwrap();
-                                conn.try_write(&size_buf).await;
-                                conn.try_write(&buf).await;
-                            }
-
-                            rsp = conn.try_read(&mut size_buf) => {
-                                let size = read_u32(&size_buf);
-                                let buf = read_buffer(&mut conn, size);
-                                // TODO: response type dispatch, deserialize
-                            }
-
-                            _ = token.cancelled() => {
+                    while !token.is_cancelled() {
+                        match interest {
+                            IOInterest::Reconnect => {
                                 break;
+                            }
+
+                            IOInterest::PrimeConnect => {
+                                match Client::prime_connection(
+                                    &conn,
+                                    last_zxid,
+                                    session_id,
+                                    &passwd,
+                                    config.clone(),
+                                )
+                                .await
+                                {
+                                    Ok(_) => {
+                                        interest = IOInterest::PrimeConnectResponse;
+                                    }
+                                    Err(_) => {
+                                        interest = IOInterest::PrimeConnect;
+                                    }
+                                }
+                            }
+
+                            IOInterest::PrimeConnectResponse => {
+                                interest = IOInterest::Write;
+                            }
+
+                            IOInterest::Read => match Self::do_read(&mut conn).await {
+                                Ok(_) => {
+                                    interest = IOInterest::Write;
+                                }
+                                Err(e) => {
+                                    error!("Read failed, {}", e);
+                                    interest = IOInterest::Reconnect;
+                                }
+                            },
+
+                            IOInterest::Write => {
+                                let size = to_send.len();
+                                for _ in 0..size {
+                                    if let Some(req) = to_send.recv().await {
+                                        let buf = req.to_buffer().freeze();
+                                        conn.try_write(&buf).await;
+                                    }
+                                }
+                                interest = IOInterest::Read;
                             }
                         }
                     }
                 }
                 Err(e) => {
                     warn!("Connect to {} failed, error: {}", host, e);
+                    let connect_elapsed = Instant::now() - connect_start;
+                    let connect_step = session_timeout / 3;
+                    if connect_step > connect_elapsed {
+                        sleep(connect_elapsed - connect_elapsed).await;
+                    }
+                    interest = IOInterest::PrimeConnect;
                 }
             }
         }
 
         info!("IO task exited");
     }
-}
-
-fn read_u32(buf: &[u8; 4]) -> u32 {
-    let mut cursor = io::Cursor::new(buf);
-    cursor.read_u32::<BigEndian>().unwrap()
-}
-
-async fn read_buffer(mut conn: &mut TcpStream, len: u32) -> Result<Bytes, io::Error> {
-    let mut buf = bytes::BytesMut::with_capacity(len as usize);
-    conn.read_exact(&mut buf).await?;
-    Ok(buf.freeze())
 }

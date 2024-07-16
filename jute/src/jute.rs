@@ -192,5 +192,3 @@ macro_rules! jute_message {
         }
     }
 }
-
-
