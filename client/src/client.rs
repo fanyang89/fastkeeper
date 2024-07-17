@@ -10,8 +10,8 @@ use bytes::{BufMut, Bytes, BytesMut};
 use rand::Rng;
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpStream;
-use tokio::sync::mpsc;
 use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::sync::mpsc::{self, UnboundedSender};
 use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::error::Elapsed;
 use tokio::time::{sleep, Instant, Timeout};
@@ -61,9 +61,10 @@ struct Response {
 impl Deserialize for Response {
     fn from_buffer(mut buf: &mut Bytes) -> Result<Self, anyhow::Error>
     where
-        Self: Sized {
-            let header = ReplyHeader::from_buffer(&mut buf);
-            todo!()
+        Self: Sized,
+    {
+        let header = ReplyHeader::from_buffer(&mut buf);
+        todo!()
     }
 }
 
@@ -117,7 +118,13 @@ impl Default for Config {
     }
 }
 
-pub type CompletionCb = Box<dyn FnOnce(EventType, State, String) + Send>; // type, state, path
+pub struct Event {
+    r#type: EventType,
+    state: State,
+    path: String,
+}
+
+pub type OnEvent = Box<dyn Fn(EventType, State, String) + Send>; // type, state, path
 
 struct ProcessState {
     last_zxid: i64,
@@ -151,7 +158,7 @@ pub struct Client {
     runtime: runtime::Runtime,
     token: CancellationToken,
     tasks: JoinSet<()>,
-    completion_tx: mpsc::UnboundedSender<Box<CompletionCb>>,
+    completion_tx: mpsc::UnboundedSender<Event>,
     req_tx: mpsc::UnboundedSender<Request>,
     rsp_tx: mpsc::UnboundedSender<Response>,
     sent_tx: mpsc::UnboundedSender<messages::Type>,
@@ -160,7 +167,7 @@ pub struct Client {
 }
 
 impl Client {
-    pub fn new(hosts: Vec<String>, config: Config) -> Self {
+    pub fn new(hosts: Vec<String>, cb: OnEvent, config: Config) -> Self {
         let runtime = runtime::Builder::new_multi_thread()
             .worker_threads(config.worker_threads)
             .max_blocking_threads(config.max_blocking_threads)
@@ -171,8 +178,8 @@ impl Client {
         let token = CancellationToken::new();
         let mut tasks = JoinSet::new();
 
-        let (completion_tx, completion_rx) = mpsc::unbounded_channel::<Box<CompletionCb>>();
-        tasks.spawn(Client::task_completion(token.clone(), completion_rx));
+        let (completion_tx, completion_rx) = mpsc::unbounded_channel::<Event>();
+        tasks.spawn(Client::task_completion(token.clone(), completion_rx, cb));
 
         let (req_tx, req_rx) = mpsc::unbounded_channel::<Request>();
         let (rsp_tx, rsp_rx) = mpsc::unbounded_channel::<Response>();
@@ -181,6 +188,7 @@ impl Client {
             HostProvider::new(hosts, &config.shuffle_mode),
             req_rx,
             rsp_rx,
+            completion_tx.clone(),
             config.clone(),
         ));
 
@@ -255,7 +263,8 @@ impl Client {
 
     async fn task_completion(
         token: CancellationToken,
-        mut rx: UnboundedReceiver<Box<CompletionCb>>,
+        mut rx: UnboundedReceiver<Event>,
+        cb: OnEvent,
     ) {
         loop {
             select! {
@@ -263,13 +272,22 @@ impl Client {
                     break;
                 },
 
-                else => {
-                    while let Some(cb) = rx.recv().await {
-                        let now = Instant::now();
-                        cb(EventType::Session, State::Connecting, "".to_string());
-                        let elapsed = Instant::now() - now;
-                        if elapsed > Duration::from_secs(1) {
-                            warn!("Slow callback execution detected");
+                event = rx.recv() => {
+                    match event {
+                        Some(e) => {
+                            let now = Instant::now();
+                            {
+                                let Event { r#type, state, path } = e;
+                                cb(r#type, state, path);
+                            }
+                            let elapsed = Instant::now() - now;
+                            if elapsed > Duration::from_secs(1) {
+                                warn!("Slow callback execution detected");
+                            }
+                        }
+
+                        None => {
+                            token.cancel();
                         }
                     }
                 }
@@ -402,6 +420,7 @@ impl Client {
         mut host_provider: HostProvider,
         mut to_send: UnboundedReceiver<Request>,
         to_recv: UnboundedReceiver<Response>,
+        mut completion_tx: UnboundedSender<Event>,
         config: Config,
     ) {
         let Config {
@@ -423,7 +442,7 @@ impl Client {
 
                 r = Client::connect_timeout(&host, connect_timeout) => {
                     match r {
-                        Ok(mut conn) => match Client::process_loop(&mut conn,&mut state, config.clone(), token.clone(), &mut to_send).await {
+                        Ok(mut conn) => match Client::process_loop(&mut conn, &mut state, config.clone(), token.clone(), &mut to_send).await {
                             Ok(_) => todo!(),
                             Err(_) => todo!(),
                         },
