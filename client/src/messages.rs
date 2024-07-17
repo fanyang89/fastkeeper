@@ -1,3 +1,122 @@
+pub enum Type {
+    Id(data::Id),
+    ACL(data::ACL),
+    Stat(data::Stat),
+    StatPersisted(data::StatPersisted),
+    ClientInfo(data::ClientInfo),
+
+    ConnectRequest(proto::ConnectRequest),
+    ConnectResponse(proto::ConnectResponse),
+    SetWatches(proto::SetWatches),
+    SetWatches2(proto::SetWatches2),
+    RequestHeader(proto::RequestHeader),
+    MultiHeader(proto::MultiHeader),
+    AuthPacket(proto::AuthPacket),
+    ReplyHeader(proto::ReplyHeader),
+    GetDataRequest(proto::GetDataRequest),
+    SetDataRequest(proto::SetDataRequest),
+    ReconfigRequest(proto::ReconfigRequest),
+    SetDataResponse(proto::SetDataResponse),
+    GetSASLRequest(proto::GetSASLRequest),
+    SetSASLRequest(proto::SetSASLRequest),
+    SetSASLResponse(proto::SetSASLResponse),
+    CreateRequest(proto::CreateRequest),
+    CreateTTLRequest(proto::CreateTTLRequest),
+    DeleteRequest(proto::DeleteRequest),
+    GetChildrenRequest(proto::GetChildrenRequest),
+    GetAllChildrenNumberRequest(proto::GetAllChildrenNumberRequest),
+    GetChildren2Request(proto::GetChildren2Request),
+    CheckVersionRequest(proto::CheckVersionRequest),
+    GetMaxChildrenRequest(proto::GetMaxChildrenRequest),
+    GetMaxChildrenResponse(proto::GetMaxChildrenResponse),
+    SetMaxChildrenRequest(proto::SetMaxChildrenRequest),
+    SyncRequest(proto::SyncRequest),
+    SyncResponse(proto::SyncResponse),
+    GetACLRequest(proto::GetACLRequest),
+    SetACLRequest(proto::SetACLRequest),
+    SetACLResponse(proto::SetACLResponse),
+    AddWatchRequest(proto::AddWatchRequest),
+    WatcherEvent(proto::WatcherEvent),
+    ErrorResponse(proto::ErrorResponse),
+    CreateResponse(proto::CreateResponse),
+    Create2Response(proto::Create2Response),
+    ExistsRequest(proto::ExistsRequest),
+    ExistsResponse(proto::ExistsResponse),
+    GetDataResponse(proto::GetDataResponse),
+    GetChildrenResponse(proto::GetChildrenResponse),
+    GetAllChildrenNumberResponse(proto::GetAllChildrenNumberResponse),
+    GetChildren2Response(proto::GetChildren2Response),
+    GetACLResponse(proto::GetACLResponse),
+    CheckWatchesRequest(proto::CheckWatchesRequest),
+    RemoveWatchesRequest(proto::RemoveWatchesRequest),
+    GetEphemeralsRequest(proto::GetEphemeralsRequest),
+    GetEphemeralsResponse(proto::GetEphemeralsResponse),
+    WhoAmIResponse(proto::WhoAmIResponse),
+
+    LearnerInfo(quorum::LearnerInfo),
+    QuorumPacket(quorum::QuorumPacket),
+    QuorumAuthPacket(quorum::QuorumAuthPacket),
+
+    FileHeader(persistence::FileHeader),
+
+    TxnDigest(txn::TxnDigest),
+    TxnHeader(txn::TxnHeader),
+    CreateTxnV0(txn::CreateTxnV0),
+    CreateTxn(txn::CreateTxn),
+    CreateTTLTxn(txn::CreateTTLTxn),
+    CreateContainerTxn(txn::CreateContainerTxn),
+    DeleteTxn(txn::DeleteTxn),
+    SetDataTxn(txn::SetDataTxn),
+    CheckVersionTxn(txn::CheckVersionTxn),
+    SetACLTxn(txn::SetACLTxn),
+    SetMaxChildrenTxn(txn::SetMaxChildrenTxn),
+    CreateSessionTxn(txn::CreateSessionTxn),
+    CloseSessionTxn(txn::CloseSessionTxn),
+    ErrorTxn(txn::ErrorTxn),
+    Txn(txn::Txn),
+    MultiTxn(txn::MultiTxn),
+}
+
+#[repr(i32)]
+pub enum OpCode {
+    OpNotify = 0,
+    OpCreate = 1,
+    OpDelete = 2,
+    OpExists = 3,
+    OpGetData = 4,
+    OpSetData = 5,
+    OpGetAcl = 6,
+    OpSetAcl = 7,
+    OpGetChildren = 8,
+    OpSync = 9,
+    OpPing = 11,
+    OpGetChildren2 = 12,
+    OpCheck = 13,
+    OpMulti = 14,
+    OpReconfig = 16,
+    OpCreateContainer = 19,
+    OpCreateTTL = 21,
+    OpClose = -11,
+    OpSetAuth = 100,
+    OpSetWatches = 101,
+    OpError = -1,
+
+    // Not in protocol, used internally
+    OpWatcherEvent = -2,
+}
+
+impl From<i32> for OpCode {
+    fn from(value: i32) -> Self {
+        unsafe { ::std::mem::transmute(value) }
+    }
+}
+
+impl From<OpCode> for i32 {
+    fn from(value: OpCode) -> Self {
+        value as i32
+    }
+}
+
 // module org.apache.zookeeper.data
 pub mod data {
     use jute::jute_message;

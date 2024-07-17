@@ -8,7 +8,7 @@ pub enum Error {
     Eof,
 }
 
-pub trait Deserialize {
+pub trait Deserialize: Send {
     fn from_buffer(buf: &mut Bytes) -> Result<Self, anyhow::Error>
     where
         Self: Sized;
@@ -92,7 +92,7 @@ pub trait Serialize {
     fn write_buffer(&self, buf: &mut BytesMut);
 }
 
-pub trait SerializeToBuffer {
+pub trait SerializeToBuffer: Send {
     fn to_buffer(&self) -> BytesMut;
 }
 

@@ -1,0 +1,446 @@
+use std::future::Future;
+use std::io;
+use std::sync::atomic::{self, AtomicI32};
+use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use anyhow::anyhow;
+use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
+use bytes::{BufMut, Bytes, BytesMut};
+use rand::Rng;
+use tokio::io::AsyncReadExt;
+use tokio::net::TcpStream;
+use tokio::sync::mpsc;
+use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::task::{JoinHandle, JoinSet};
+use tokio::time::error::Elapsed;
+use tokio::time::{sleep, Instant, Timeout};
+use tokio::{runtime, select, task};
+use tokio_util::sync::CancellationToken;
+use tracing::{error, info, trace, warn};
+
+use jute::{Deserialize, Serialize, SerializeToBuffer};
+
+use crate::frame::FrameReadWriter;
+use crate::host_provider::HostProvider;
+use crate::messages::proto::{ConnectRequest, ConnectResponse, ReplyHeader, RequestHeader};
+use crate::messages::{self, OpCode};
+
+struct Request {
+    header: RequestHeader,
+    payload: Option<Box<dyn SerializeToBuffer>>,
+}
+
+impl SerializeToBuffer for Request {
+    fn to_buffer(&self) -> BytesMut {
+        // TODO confirm the binary layout
+        let mut b = BytesMut::new();
+        let buf = self.header.to_buffer().freeze();
+        b.put(buf);
+
+        match &self.payload {
+            Some(payload) => {
+                let buf = payload.to_buffer().freeze();
+                let size = buf.len() as u32;
+                b.put_u32(size);
+                b.put(buf);
+            }
+
+            None => {}
+        }
+
+        b
+    }
+}
+
+struct Response {
+    header: ReplyHeader,
+    payload: Box<dyn Deserialize>,
+}
+
+impl Deserialize for Response {
+    fn from_buffer(mut buf: &mut Bytes) -> Result<Self, anyhow::Error>
+    where
+        Self: Sized {
+            let header = ReplyHeader::from_buffer(&mut buf);
+            todo!()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum State {
+    Connecting,
+    Connected,
+}
+
+#[derive(Clone, Debug)]
+pub enum SessionEvent {
+    Connected,    // state: Connecting -> Connected,
+    Disconnected, // state: Connected -> Connecting,
+    AuthFailed,   // state: Connecting -> AuthFailed,
+}
+
+#[derive(Clone, Debug)]
+pub enum EventType {
+    Session,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum ShuffleMode {
+    Disable,
+    Enable,
+    Once,
+}
+
+#[derive(Clone, Debug)]
+pub struct Config {
+    pub shuffle_mode: ShuffleMode,
+    pub connect_timeout: Duration,
+    pub completion_warn_timeout: Duration,
+    pub session_timeout: Duration,
+    pub read_only: bool,
+    pub worker_threads: usize,
+    pub max_blocking_threads: usize,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            shuffle_mode: ShuffleMode::Enable,
+            connect_timeout: Duration::from_secs(1),
+            completion_warn_timeout: Duration::from_secs(1),
+            session_timeout: Duration::from_secs(10),
+            read_only: false,
+            worker_threads: 1,
+            max_blocking_threads: 1,
+        }
+    }
+}
+
+pub type CompletionCb = Box<dyn FnOnce(EventType, State, String) + Send>; // type, state, path
+
+struct ProcessState {
+    last_zxid: i64,
+    session_id: i64,
+    passwd: jute::Buffer,
+    last_send: Instant,
+}
+
+impl ProcessState {
+    pub fn new() -> Self {
+        Self {
+            last_zxid: 0,
+            session_id: 0,
+            passwd: Vec::with_capacity(16),
+            last_send: Instant::now(),
+        }
+    }
+
+    pub fn update_last_send(&mut self) {
+        self.last_send = Instant::now();
+    }
+
+    pub fn update_session(&mut self, rsp: &ConnectResponse) {
+        self.session_id = rsp.session_id;
+        self.passwd = rsp.passwd.clone();
+        trace!("Session established, session id: {:#x}", self.session_id);
+    }
+}
+
+pub struct Client {
+    runtime: runtime::Runtime,
+    token: CancellationToken,
+    tasks: JoinSet<()>,
+    completion_tx: mpsc::UnboundedSender<Box<CompletionCb>>,
+    req_tx: mpsc::UnboundedSender<Request>,
+    rsp_tx: mpsc::UnboundedSender<Response>,
+    sent_tx: mpsc::UnboundedSender<messages::Type>,
+    sent_rx: mpsc::UnboundedReceiver<messages::Type>,
+    xid: Arc<AtomicI32>,
+}
+
+impl Client {
+    pub fn new(hosts: Vec<String>, config: Config) -> Self {
+        let runtime = runtime::Builder::new_multi_thread()
+            .worker_threads(config.worker_threads)
+            .max_blocking_threads(config.max_blocking_threads)
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let token = CancellationToken::new();
+        let mut tasks = JoinSet::new();
+
+        let (completion_tx, completion_rx) = mpsc::unbounded_channel::<Box<CompletionCb>>();
+        tasks.spawn(Client::task_completion(token.clone(), completion_rx));
+
+        let (req_tx, req_rx) = mpsc::unbounded_channel::<Request>();
+        let (rsp_tx, rsp_rx) = mpsc::unbounded_channel::<Response>();
+        tasks.spawn(Client::task_io(
+            token.clone(),
+            HostProvider::new(hosts, &config.shuffle_mode),
+            req_rx,
+            rsp_rx,
+            config.clone(),
+        ));
+
+        let initial_xid = rand::thread_rng().gen::<u16>() as i32;
+        let (sent_tx, sent_rx) = mpsc::unbounded_channel::<messages::Type>();
+        Client {
+            runtime,
+            token,
+            tasks,
+            completion_tx,
+            rsp_tx,
+            req_tx,
+            sent_tx,
+            sent_rx,
+            xid: Arc::new(AtomicI32::new(initial_xid)),
+        }
+    }
+}
+
+impl Drop for Client {
+    fn drop(&mut self) {
+        self.token.cancel();
+        task::block_in_place(async || while let _ = self.tasks.join_next().await {});
+    }
+}
+
+impl Client {
+    fn get_xid(&self) -> i32 {
+        self.xid.fetch_add(1, atomic::Ordering::SeqCst)
+    }
+
+    async fn connect_timeout(host: &String, timeout: Duration) -> Result<TcpStream, anyhow::Error> {
+        // TODO: async DNS resolve
+        match tokio::time::timeout(timeout, TcpStream::connect(host)).await {
+            Ok(s) => match s {
+                Ok(stream) => Ok(stream),
+                Err(e) => Err(e.into()),
+            },
+            Err(_) => Err(anyhow!("connect timeout after {}ms", timeout.as_millis())),
+        }
+    }
+
+    async fn prime_connection(
+        conn: &TcpStream,
+        state: &ProcessState,
+        config: &Config,
+    ) -> Result<(), anyhow::Error> {
+        let req = ConnectRequest {
+            protocol_version: 0, // version 0
+            last_zxid_seen: state.last_zxid,
+            time_out: config.session_timeout.as_millis() as i32,
+            session_id: state.session_id,
+            passwd: state.passwd.clone(),
+            read_only: config.read_only,
+        };
+        let buf = req.to_buffer().freeze();
+        conn.write_frame(&buf).await?;
+        Ok(())
+    }
+
+    async fn prime_connection_response(
+        conn: &mut TcpStream,
+        state: &mut ProcessState,
+        config: &Config,
+    ) -> Result<(), anyhow::Error> {
+        let mut frame = conn.read_frame().await?;
+        let rsp = ConnectResponse::from_buffer(&mut frame)?;
+        state.update_session(&rsp);
+        // TODO: handle session expired
+        Ok(())
+    }
+
+    async fn task_completion(
+        token: CancellationToken,
+        mut rx: UnboundedReceiver<Box<CompletionCb>>,
+    ) {
+        loop {
+            select! {
+                _ = token.cancelled() => {
+                    break;
+                },
+
+                else => {
+                    while let Some(cb) = rx.recv().await {
+                        let now = Instant::now();
+                        cb(EventType::Session, State::Connecting, "".to_string());
+                        let elapsed = Instant::now() - now;
+                        if elapsed > Duration::from_secs(1) {
+                            warn!("Slow callback execution detected");
+                        }
+                    }
+                }
+            }
+        }
+
+        info!("Completion task exited");
+    }
+
+    async fn do_read(mut conn: &mut TcpStream) -> Result<(), anyhow::Error> {
+        loop {
+            // read buffer from socket
+            let mut size_buf = [0u8; 4];
+            match conn.read_exact(&mut size_buf).await {
+                Ok(_) => {
+                    let mut cursor = io::Cursor::new(size_buf);
+                    let size = ReadBytesExt::read_u32::<BigEndian>(&mut cursor).unwrap();
+                    let mut buf = BytesMut::with_capacity(size as usize);
+                    conn.read_exact(&mut buf).await?;
+                    let b = buf.freeze();
+                }
+                Err(e) => {
+                    todo!()
+                }
+            }
+
+            if !conn.readable().await.is_ok() {
+                break;
+            }
+        }
+
+        // TODO: response type dispatch, deserialize
+        Ok(())
+    }
+
+    async fn do_write(
+        mut conn: &mut TcpStream,
+        timeout: Duration,
+        mut to_send: &mut UnboundedReceiver<Request>,
+    ) -> Result<(), anyhow::Error> {
+        let size = to_send.len();
+        for _ in 0..size {
+            if let Some(req) = to_send.recv().await {
+                let buf = req.to_buffer().freeze();
+                conn.try_write(&buf).unwrap(); // write rarely failed
+            }
+        }
+        Ok(())
+    }
+
+    async fn process_loop(
+        mut conn: &mut TcpStream,
+        mut state: &mut ProcessState,
+        config: Config,
+        token: CancellationToken,
+        mut to_send: &mut UnboundedReceiver<Request>,
+    ) -> Result<(), anyhow::Error> {
+        let Config {
+            session_timeout, ..
+        } = config;
+
+        let read_timeout = session_timeout / 3 * 2;
+        let write_timeout = session_timeout / 3;
+
+        // send connection request
+        if let Err(e) = Client::prime_connection(&conn, &state, &config).await {
+            return Err(e);
+        }
+        state.update_last_send();
+
+        // read connection response
+        if let Err(e) = tokio::time::timeout(
+            read_timeout,
+            Client::prime_connection_response(conn, &mut state, &config),
+        )
+        .await
+        {
+            return Err(io::Error::from(io::ErrorKind::TimedOut).into());
+        }
+
+        // start ping timer
+        let mut interval = tokio::time::interval(write_timeout);
+
+        // io loop
+        loop {
+            tokio::select! {
+                _ = token.cancelled() => {
+                    break;
+                }
+
+                _ = conn.readable() => {
+                    if let Err(e) = tokio::time::timeout(read_timeout, Client::do_read(&mut conn)).await? {
+                        error!("Read failed, {}", e);
+                    }
+                }
+
+                _ = interval.tick() => {
+                    let now = Instant::now();
+                    if now - state.last_send >= write_timeout {
+                        Client::send_ping(&conn).await;
+                        state.update_last_send();
+                    }
+                }
+
+                _ = conn.writable() => {
+                    if let Err(e) = Self::do_write(&mut conn, write_timeout, &mut to_send).await {
+                        error!("Write failed, {}", e);
+                    }
+                    state.update_last_send();
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn send_ping(conn: &TcpStream) -> Result<(), anyhow::Error> {
+        let req = RequestHeader {
+            xid: -2, // TODO replace magic number
+            r#type: OpCode::OpPing.into(),
+        };
+        conn.write_frame(&req.to_buffer().freeze()).await?;
+        trace!("Request ping sent");
+        Ok(())
+    }
+
+    // io task
+    async fn task_io(
+        token: CancellationToken,
+        mut host_provider: HostProvider,
+        mut to_send: UnboundedReceiver<Request>,
+        to_recv: UnboundedReceiver<Response>,
+        config: Config,
+    ) {
+        let Config {
+            connect_timeout,
+            session_timeout,
+            ..
+        } = config;
+        let mut state = ProcessState::new();
+
+        loop {
+            let host = host_provider.next().unwrap();
+            let connect_start = Instant::now();
+            info!("Connecting to {}", host);
+
+            tokio::select! {
+                _ = token.cancelled() => {
+                    break;
+                }
+
+                r = Client::connect_timeout(&host, connect_timeout) => {
+                    match r {
+                        Ok(mut conn) => match Client::process_loop(&mut conn,&mut state, config.clone(), token.clone(), &mut to_send).await {
+                            Ok(_) => todo!(),
+                            Err(_) => todo!(),
+                        },
+
+                        Err(e) => {
+                            warn!("Connect to {} failed, error: {}", host, e);
+                            let connect_elapsed = Instant::now() - connect_start;
+                            let connect_step = session_timeout / 3;
+                            if connect_step > connect_elapsed {
+                                sleep(connect_step - connect_elapsed).await;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        info!("IO task exited");
+    }
+}
