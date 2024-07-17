@@ -28,7 +28,7 @@ use crate::messages::{self, OpCode};
 
 struct Request {
     header: RequestHeader,
-    payload: Option<Box<dyn SerializeToBuffer>>,
+    payload: Option<messages::Type>,
 }
 
 impl SerializeToBuffer for Request {
