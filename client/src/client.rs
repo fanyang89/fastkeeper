@@ -25,7 +25,7 @@ use jute::{Deserialize, Serialize, SerializeToBuffer};
 use crate::frame::FrameReadWriter;
 use crate::host_provider::HostProvider;
 use crate::messages::proto::{
-    ConnectRequest, ConnectResponse, GetDataRequest, GetDataResponse, ReplyHeader, RequestHeader
+    ConnectRequest, ConnectResponse, GetDataRequest, GetDataResponse, ReplyHeader, RequestHeader,
 };
 use crate::messages::{self, OpCode, Type};
 
@@ -165,8 +165,6 @@ pub struct Client {
     completion_tx: mpsc::UnboundedSender<Event>,
     req_tx: mpsc::UnboundedSender<Request>,
     rsp_tx: mpsc::UnboundedSender<Response>,
-    sent_tx: mpsc::UnboundedSender<messages::Type>,
-    sent_rx: mpsc::UnboundedReceiver<messages::Type>,
     xid: Arc<AtomicI32>,
 }
 
@@ -190,14 +188,13 @@ impl Client {
         tasks.spawn(Client::task_io(
             token.clone(),
             HostProvider::new(hosts, &config.shuffle_mode),
+            config.clone(),
             req_rx,
             rsp_rx,
             completion_tx.clone(),
-            config.clone(),
         ));
 
         let initial_xid = rand::thread_rng().gen::<u16>() as i32;
-        let (sent_tx, sent_rx) = mpsc::unbounded_channel::<messages::Type>();
         Client {
             runtime,
             token,
@@ -205,8 +202,6 @@ impl Client {
             completion_tx,
             rsp_tx,
             req_tx,
-            sent_tx,
-            sent_rx,
             xid: Arc::new(AtomicI32::new(initial_xid)),
         }
     }
@@ -376,7 +371,6 @@ impl Client {
                 }
 
                 _ = conn.readable() => {
-                    // TODO read from channel directly
                     if let Err(e) = tokio::time::timeout(read_timeout, Client::do_read(&mut conn)).await? {
                         error!("Read failed, {}", e);
                     }
@@ -416,10 +410,10 @@ impl Client {
     async fn task_io(
         token: CancellationToken,
         mut host_provider: HostProvider,
+        config: Config,
         mut to_send: UnboundedReceiver<Request>,
         to_recv: UnboundedReceiver<Response>,
         mut completion_tx: UnboundedSender<Event>,
-        config: Config,
     ) {
         let Config {
             connect_timeout,
@@ -427,6 +421,7 @@ impl Client {
             ..
         } = config;
         let mut state = ProcessState::new();
+        let (sent_tx, sent_rx) = mpsc::unbounded_channel::<messages::Type>();
 
         loop {
             let host = host_provider.next().unwrap();
@@ -472,7 +467,11 @@ impl RequestHeader {
 }
 
 impl Client {
-    pub async fn get(&mut self, path: String, watch: bool) -> Result<GetDataResponse, anyhow::Error> {
+    pub async fn get(
+        &mut self,
+        path: String,
+        watch: bool,
+    ) -> Result<GetDataResponse, anyhow::Error> {
         let (tx, rx) = oneshot::channel::<Response>();
         let req = Request {
             header: RequestHeader::new(self.get_xid(), OpCode::OpGetData),
