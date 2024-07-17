@@ -12,6 +12,7 @@ use tokio::io::AsyncReadExt;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::mpsc::{self, UnboundedSender};
+use tokio::sync::oneshot;
 use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::error::Elapsed;
 use tokio::time::{sleep, Instant, Timeout};
@@ -23,12 +24,15 @@ use jute::{Deserialize, Serialize, SerializeToBuffer};
 
 use crate::frame::FrameReadWriter;
 use crate::host_provider::HostProvider;
-use crate::messages::proto::{ConnectRequest, ConnectResponse, ReplyHeader, RequestHeader};
-use crate::messages::{self, OpCode};
+use crate::messages::proto::{
+    ConnectRequest, ConnectResponse, GetDataRequest, GetDataResponse, ReplyHeader, RequestHeader
+};
+use crate::messages::{self, OpCode, Type};
 
 struct Request {
     header: RequestHeader,
     payload: Option<messages::Type>,
+    wake: oneshot::Sender<Response>,
 }
 
 impl SerializeToBuffer for Request {
@@ -55,7 +59,7 @@ impl SerializeToBuffer for Request {
 
 struct Response {
     header: ReplyHeader,
-    payload: Box<dyn Deserialize>,
+    payload: bytes::Bytes,
 }
 
 impl Deserialize for Response {
@@ -298,27 +302,20 @@ impl Client {
     }
 
     async fn do_read(mut conn: &mut TcpStream) -> Result<(), anyhow::Error> {
-        loop {
-            // read buffer from socket
-            let mut size_buf = [0u8; 4];
-            match conn.read_exact(&mut size_buf).await {
-                Ok(_) => {
-                    let mut cursor = io::Cursor::new(size_buf);
-                    let size = ReadBytesExt::read_u32::<BigEndian>(&mut cursor).unwrap();
-                    let mut buf = BytesMut::with_capacity(size as usize);
-                    conn.read_exact(&mut buf).await?;
-                    let b = buf.freeze();
-                }
-                Err(e) => {
-                    todo!()
-                }
+        // read buffer from socket
+        let mut size_buf = [0u8; 4];
+        match conn.read_exact(&mut size_buf).await {
+            Ok(_) => {
+                let mut cursor = io::Cursor::new(size_buf);
+                let size = ReadBytesExt::read_u32::<BigEndian>(&mut cursor).unwrap();
+                let mut buf = BytesMut::with_capacity(size as usize);
+                conn.read_exact(&mut buf).await?;
+                let b = buf.freeze();
             }
-
-            if !conn.readable().await.is_ok() {
-                break;
+            Err(e) => {
+                return Err(e.into());
             }
         }
-
         // TODO: response type dispatch, deserialize
         Ok(())
     }
@@ -332,7 +329,7 @@ impl Client {
         for _ in 0..size {
             if let Some(req) = to_send.recv().await {
                 let buf = req.to_buffer().freeze();
-                conn.try_write(&buf).unwrap(); // write rarely failed
+                conn.try_write(&buf)?;
             }
         }
         Ok(())
@@ -379,6 +376,7 @@ impl Client {
                 }
 
                 _ = conn.readable() => {
+                    // TODO read from channel directly
                     if let Err(e) = tokio::time::timeout(read_timeout, Client::do_read(&mut conn)).await? {
                         error!("Read failed, {}", e);
                     }
@@ -461,5 +459,28 @@ impl Client {
         }
 
         info!("IO task exited");
+    }
+}
+
+impl RequestHeader {
+    pub fn new(xid: i32, op: OpCode) -> Self {
+        Self {
+            xid,
+            r#type: op.into(),
+        }
+    }
+}
+
+impl Client {
+    pub async fn get(&mut self, path: String, watch: bool) -> Result<GetDataResponse, anyhow::Error> {
+        let (tx, rx) = oneshot::channel::<Response>();
+        let req = Request {
+            header: RequestHeader::new(self.get_xid(), OpCode::OpGetData),
+            payload: Some(Type::GetDataRequest(GetDataRequest { path, watch })),
+            wake: tx,
+        };
+        self.req_tx.send(req);
+        let mut rsp = rx.await?;
+        Ok(GetDataResponse::from_buffer(&mut rsp.payload)?)
     }
 }
