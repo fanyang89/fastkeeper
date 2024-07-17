@@ -301,23 +301,12 @@ impl Client {
         info!("Completion task exited");
     }
 
-    async fn do_read(mut conn: &mut TcpStream) -> Result<(), anyhow::Error> {
-        // read buffer from socket
-        let mut size_buf = [0u8; 4];
-        match conn.read_exact(&mut size_buf).await {
-            Ok(_) => {
-                let mut cursor = io::Cursor::new(size_buf);
-                let size = ReadBytesExt::read_u32::<BigEndian>(&mut cursor).unwrap();
-                let mut buf = BytesMut::with_capacity(size as usize);
-                conn.read_exact(&mut buf).await?;
-                let b = buf.freeze();
-            }
-            Err(e) => {
-                return Err(e.into());
-            }
-        }
+    async fn do_read(mut conn: &mut TcpStream, size: u32) -> Result<Response, anyhow::Error> {
+        let mut buf = BytesMut::with_capacity(size as usize);
+        conn.read_exact(&mut buf).await?;
+        let b = buf.freeze();
         // TODO: response type dispatch, deserialize
-        Ok(())
+        todo!()
     }
 
     async fn do_write(
@@ -369,16 +358,40 @@ impl Client {
         let mut interval = tokio::time::interval(write_timeout);
 
         // io loop
+        let mut size_buf = [0u8; 4];
         loop {
             tokio::select! {
                 _ = token.cancelled() => {
                     break;
                 }
 
-                _ = conn.readable() => {
-                    // TODO read from channel directly
-                    if let Err(e) = tokio::time::timeout(read_timeout, Client::do_read(&mut conn)).await? {
-                        error!("Read failed, {}", e);
+                r = tokio::time::timeout(read_timeout, conn.read_exact(&mut size_buf)) => {
+                    match r {
+                        Ok(r) => {
+                            match r {
+                                Ok(_) => {
+                                    let mut cursor = io::Cursor::new(size_buf);
+                                    let size = ReadBytesExt::read_u32::<BigEndian>(&mut cursor).unwrap();
+                                    match Client::do_read(conn, size).await {
+                                        Ok(rsp) => {
+
+                                        }
+
+                                        Err(e) => {
+                                            error!("Read frame body failed, {}", e);
+                                        }
+                                    }
+                                }
+
+                                Err(e) => {
+                                    error!("Read frame size failed, {}", e);
+                                }
+                            }
+                        }
+
+                        Err(_) => {
+                            error!("Read timeout");
+                        }
                     }
                 }
 
