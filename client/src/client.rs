@@ -6,7 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::anyhow;
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use rand::Rng;
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpStream;
@@ -31,35 +31,25 @@ use crate::messages::{self, OpCode, Type};
 
 struct Request {
     header: RequestHeader,
-    payload: Option<messages::Type>,
+    payload: Option<Type>,
     wake: oneshot::Sender<Response>,
 }
 
 impl SerializeToBuffer for Request {
     fn to_buffer(&self) -> BytesMut {
-        // TODO confirm the binary layout
-        let mut b = BytesMut::new();
-        let buf = self.header.to_buffer().freeze();
-        b.put(buf);
-
-        match &self.payload {
-            Some(payload) => {
-                let buf = payload.to_buffer().freeze();
-                let size = buf.len() as u32;
-                b.put_u32(size);
-                b.put(buf);
-            }
-
-            None => {}
+        let mut buf = self.header.to_buffer();
+        if let Some(payload) = &self.payload {
+            let payload_buf = payload.to_buffer();
+            buf.put_u32(buf.len() as u32);
+            buf.put(payload_buf);
         }
-
-        b
+        buf.clone()
     }
 }
 
 struct Response {
     header: ReplyHeader,
-    payload: bytes::Bytes,
+    payload: Option<Bytes>,
 }
 
 impl Deserialize for Response {
@@ -67,7 +57,22 @@ impl Deserialize for Response {
     where
         Self: Sized,
     {
-        let header = ReplyHeader::from_buffer(&mut buf);
+        let header = ReplyHeader::from_buffer(&mut buf)?;
+        let payload = if let Some(size_buf) = buf.get(0..4) {
+            let size = u32::from_be_bytes(size_buf.try_into()?) as usize;
+            let data = buf
+                .get(4..size)
+                .ok_or_else(|| anyhow!("corrupted response"))?;
+            Some(Bytes::from(data))
+        } else {
+            None
+        };
+        Ok(Self { header, payload })
+    }
+}
+
+impl Response {
+    pub fn get_message(&mut self, message_type: Type) -> Result<Self, anyhow::Error> {
         todo!()
     }
 }
@@ -478,8 +483,8 @@ impl Client {
             payload: Some(Type::GetDataRequest(GetDataRequest { path, watch })),
             wake: tx,
         };
-        self.req_tx.send(req);
+        self.req_tx.send(req)?;
         let mut rsp = rx.await?;
-        Ok(GetDataResponse::from_buffer(&mut rsp.payload)?)
+        Ok(GetDataResponse::from_buffer(&mut rsp.payload.unwrap())?)
     }
 }
