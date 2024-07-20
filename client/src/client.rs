@@ -62,7 +62,8 @@ impl Deserialize for Response {
             let size = u32::from_be_bytes(size_buf.try_into()?) as usize;
             let data = buf
                 .get(4..size)
-                .ok_or_else(|| anyhow!("corrupted response"))?;
+                .ok_or(anyhow!("corrupted response"))?
+                .to_vec();
             Some(Bytes::from(data))
         } else {
             None
