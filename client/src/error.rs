@@ -6,5 +6,8 @@ pub enum ClientError {
     CorruptedResponse,
 
     #[error("empty response body")]
-    EmptyResponseBody
+    EmptyResponseBody,
+
+    #[error("invalid config")]
+    InvalidConfig,
 }

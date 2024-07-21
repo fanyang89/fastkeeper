@@ -1,3 +1,4 @@
+use std::fmt::Display;
 use std::future::Future;
 use std::io;
 use std::sync::atomic::{self, AtomicI32};
@@ -7,7 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::anyhow;
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use rand::Rng;
+use rand::{random, Rng};
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -37,6 +38,12 @@ pub enum State {
     Connected,
 }
 
+impl Display for State {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum SessionEvent {
     Connected,    // state: Connecting -> Connected,
@@ -47,6 +54,12 @@ pub enum SessionEvent {
 #[derive(Clone, Debug)]
 pub enum EventType {
     Session,
+}
+
+impl Display for EventType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -121,14 +134,18 @@ pub struct Client {
     runtime: runtime::Runtime,
     token: CancellationToken,
     tasks: JoinSet<()>,
-    completion_tx: mpsc::UnboundedSender<Event>,
-    req_tx: mpsc::UnboundedSender<Request>,
-    rsp_tx: mpsc::UnboundedSender<Response>,
+    completion_tx: UnboundedSender<Event>,
+    req_tx: UnboundedSender<Request>,
+    rsp_tx: UnboundedSender<Response>,
     xid: Arc<AtomicI32>,
 }
 
 impl Client {
-    pub fn new(hosts: Vec<String>, cb: OnEvent, config: Config) -> Self {
+    pub fn new(hosts: &Vec<String>, cb: OnEvent, config: Config) -> Result<Self, anyhow::Error> {
+        if hosts.is_empty() {
+            return Err(ClientError::InvalidConfig.into());
+        }
+
         let runtime = runtime::Builder::new_multi_thread()
             .worker_threads(config.worker_threads)
             .max_blocking_threads(config.max_blocking_threads)
@@ -146,23 +163,22 @@ impl Client {
         let (rsp_tx, rsp_rx) = mpsc::unbounded_channel::<Response>();
         tasks.spawn(Client::task_io(
             token.clone(),
-            HostProvider::new(hosts, &config.shuffle_mode),
+            HostProvider::new(hosts.clone(), &config.shuffle_mode),
             config.clone(),
             req_rx,
             rsp_rx,
             completion_tx.clone(),
         ));
 
-        let initial_xid = rand::thread_rng().gen::<u16>() as i32;
-        Client {
+        Ok(Client {
             runtime,
             token,
             tasks,
             completion_tx,
             rsp_tx,
             req_tx,
-            xid: Arc::new(AtomicI32::new(initial_xid)),
-        }
+            xid: Arc::new(AtomicI32::new(random::<i32>())),
+        })
     }
 }
 
@@ -373,7 +389,7 @@ impl Client {
         config: Config,
         mut to_send: UnboundedReceiver<Request>,
         to_recv: UnboundedReceiver<Response>,
-        mut completion_tx: UnboundedSender<Event>,
+        completion_tx: UnboundedSender<Event>,
     ) {
         let Config {
             connect_timeout,
@@ -381,14 +397,14 @@ impl Client {
             ..
         } = config;
         let mut state = ProcessState::new();
-        let (sent_tx, sent_rx) = mpsc::unbounded_channel::<messages::RequestBody>();
+        let (sent_tx, sent_rx) = mpsc::unbounded_channel::<RequestBody>();
 
         loop {
             let host = host_provider.next().unwrap();
             let connect_start = Instant::now();
             info!("Connecting to {}", host);
 
-            tokio::select! {
+            select! {
                 _ = token.cancelled() => {
                     break;
                 }
@@ -443,14 +459,13 @@ impl Client {
         Ok(T::from_buffer(&mut rsp.payload.unwrap())?)
     }
 
-    pub async fn get(
-        &mut self,
-        path: String,
-        watch: bool,
-    ) -> Result<GetDataResponse, anyhow::Error> {
+    pub async fn get(&mut self, path: &str, watch: bool) -> Result<GetDataResponse, anyhow::Error> {
         self.submit_request(
             RequestHeader::new(self.get_xid(), OpCode::OpGetData),
-            Some(RequestBody::GetDataRequest(GetDataRequest { path, watch })),
+            Some(RequestBody::GetDataRequest(GetDataRequest {
+                path: path.to_string(),
+                watch,
+            })),
         )
         .await
     }

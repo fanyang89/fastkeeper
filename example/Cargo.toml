@@ -1,0 +1,11 @@
+[package]
+name = "example"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = { version = "1.0.86", features = ["backtrace"] }
+clap = { version = "4.5.9", features = ["derive"] }
+tokio = "1.38.1"
+tracing-subscriber = "0.3.18"
+zookeeper = { path = "../client" }
