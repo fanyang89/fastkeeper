@@ -20,63 +20,16 @@ use tokio::{runtime, select, task};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, trace, warn};
 
-use jute::{Deserialize, Serialize, SerializeToBuffer};
-
+use crate::error::ClientError;
 use crate::frame::FrameReadWriter;
 use crate::host_provider::HostProvider;
 use crate::messages::proto::{
     ConnectRequest, ConnectResponse, GetDataRequest, GetDataResponse, ReplyHeader, RequestHeader,
 };
-use crate::messages::{self, OpCode, Type};
-
-struct Request {
-    header: RequestHeader,
-    payload: Option<Type>,
-    wake: oneshot::Sender<Response>,
-}
-
-impl SerializeToBuffer for Request {
-    fn to_buffer(&self) -> BytesMut {
-        let mut buf = self.header.to_buffer();
-        if let Some(payload) = &self.payload {
-            let payload_buf = payload.to_buffer();
-            buf.put_u32(buf.len() as u32);
-            buf.put(payload_buf);
-        }
-        buf.clone()
-    }
-}
-
-struct Response {
-    header: ReplyHeader,
-    payload: Option<Bytes>,
-}
-
-impl Deserialize for Response {
-    fn from_buffer(mut buf: &mut Bytes) -> Result<Self, anyhow::Error>
-    where
-        Self: Sized,
-    {
-        let header = ReplyHeader::from_buffer(&mut buf)?;
-        let payload = if let Some(size_buf) = buf.get(0..4) {
-            let size = u32::from_be_bytes(size_buf.try_into()?) as usize;
-            let data = buf
-                .get(4..size)
-                .ok_or(anyhow!("corrupted response"))?
-                .to_vec();
-            Some(Bytes::from(data))
-        } else {
-            None
-        };
-        Ok(Self { header, payload })
-    }
-}
-
-impl Response {
-    pub fn get_message(&mut self, message_type: Type) -> Result<Self, anyhow::Error> {
-        todo!()
-    }
-}
+use crate::messages::{self, data, OpCode, RequestBody};
+use crate::request::Request;
+use crate::response::Response;
+use jute::{Deserialize, Serialize, SerializeToBuffer};
 
 #[derive(Clone, Debug)]
 pub enum State {
@@ -227,6 +180,7 @@ impl Client {
 
     async fn connect_timeout(host: &String, timeout: Duration) -> Result<TcpStream, anyhow::Error> {
         // TODO: async DNS resolve
+        // https://docs.rs/tokio/latest/tokio/net/fn.lookup_host.html
         match tokio::time::timeout(timeout, TcpStream::connect(host)).await {
             Ok(s) => match s {
                 Ok(stream) => Ok(stream),
@@ -427,7 +381,7 @@ impl Client {
             ..
         } = config;
         let mut state = ProcessState::new();
-        let (sent_tx, sent_rx) = mpsc::unbounded_channel::<messages::Type>();
+        let (sent_tx, sent_rx) = mpsc::unbounded_channel::<messages::RequestBody>();
 
         loop {
             let host = host_provider.next().unwrap();
@@ -473,19 +427,31 @@ impl RequestHeader {
 }
 
 impl Client {
+    pub async fn submit_request<T: Deserialize>(
+        &mut self,
+        header: RequestHeader,
+        body: Option<RequestBody>,
+    ) -> Result<T, anyhow::Error> {
+        let (tx, rx) = oneshot::channel::<Response>();
+        let req = Request {
+            header,
+            payload: body,
+            wake: tx,
+        };
+        self.req_tx.send(req)?;
+        let rsp = rx.await?;
+        Ok(T::from_buffer(&mut rsp.payload.unwrap())?)
+    }
+
     pub async fn get(
         &mut self,
         path: String,
         watch: bool,
     ) -> Result<GetDataResponse, anyhow::Error> {
-        let (tx, rx) = oneshot::channel::<Response>();
-        let req = Request {
-            header: RequestHeader::new(self.get_xid(), OpCode::OpGetData),
-            payload: Some(Type::GetDataRequest(GetDataRequest { path, watch })),
-            wake: tx,
-        };
-        self.req_tx.send(req)?;
-        let mut rsp = rx.await?;
-        Ok(GetDataResponse::from_buffer(&mut rsp.payload.unwrap())?)
+        self.submit_request(
+            RequestHeader::new(self.get_xid(), OpCode::OpGetData),
+            Some(RequestBody::GetDataRequest(GetDataRequest { path, watch })),
+        )
+        .await
     }
 }
