@@ -22,52 +22,16 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, trace, warn};
 
 use crate::error::ClientError;
+use crate::event;
 use crate::frame::FrameReadWriter;
-use crate::host_provider::HostProvider;
+use crate::host_provider::{HostProvider, ShuffleMode};
 use crate::messages::proto::{
     ConnectRequest, ConnectResponse, GetDataRequest, GetDataResponse, ReplyHeader, RequestHeader,
 };
-use crate::messages::{self, data, OpCode, RequestBody};
+use crate::messages::{self, data, proto, OpCode, RequestBody};
 use crate::request::Request;
 use crate::response::Response;
 use jute::{Deserialize, Serialize, SerializeToBuffer};
-
-#[derive(Clone, Debug)]
-pub enum State {
-    Connecting,
-    Connected,
-}
-
-impl Display for State {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:?}", self)
-    }
-}
-
-#[derive(Clone, Debug)]
-pub enum SessionEvent {
-    Connected,    // state: Connecting -> Connected,
-    Disconnected, // state: Connected -> Connecting,
-    AuthFailed,   // state: Connecting -> AuthFailed,
-}
-
-#[derive(Clone, Debug)]
-pub enum EventType {
-    Session,
-}
-
-impl Display for EventType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:?}", self)
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub enum ShuffleMode {
-    Disable,
-    Enable,
-    Once,
-}
 
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -96,13 +60,7 @@ impl Default for Config {
     }
 }
 
-pub struct Event {
-    r#type: EventType,
-    state: State,
-    path: String,
-}
-
-pub type OnEvent = Box<dyn Fn(EventType, State, String) + Send>; // type, state, path
+pub type OnEvent = Box<dyn Fn(event::Type, event::State, String) + Send>; // type, state, path
 
 struct ProcessState {
     last_zxid: i64,
@@ -128,7 +86,7 @@ impl ProcessState {
     pub fn update_session(&mut self, rsp: &ConnectResponse) {
         self.session_id = rsp.session_id;
         self.passwd = rsp.passwd.clone();
-        trace!("Session established, session id: {:#x}", self.session_id);
+        info!("Session established, session id: {:#x}", self.session_id);
     }
 }
 
@@ -136,7 +94,7 @@ pub struct Client {
     runtime: runtime::Runtime,
     token: CancellationToken,
     tasks: JoinSet<()>,
-    completion_tx: UnboundedSender<Event>,
+    completion_tx: UnboundedSender<event::Event>,
     req_tx: UnboundedSender<Request>,
     rsp_tx: UnboundedSender<Response>,
     xid: Arc<AtomicI32>,
@@ -158,7 +116,7 @@ impl Client {
         let token = CancellationToken::new();
         let mut tasks = JoinSet::new();
 
-        let (completion_tx, completion_rx) = mpsc::unbounded_channel::<Event>();
+        let (completion_tx, completion_rx) = mpsc::unbounded_channel::<event::Event>();
         tasks.spawn(Client::task_completion(token.clone(), completion_rx, cb));
 
         let (req_tx, req_rx) = mpsc::unbounded_channel::<Request>();
@@ -182,16 +140,7 @@ impl Client {
             xid: Arc::new(AtomicI32::new(random::<i32>())),
         })
     }
-}
 
-impl Drop for Client {
-    fn drop(&mut self) {
-        self.token.cancel();
-        task::block_in_place(async || while let _ = self.tasks.join_next().await {});
-    }
-}
-
-impl Client {
     fn get_xid(&self) -> i32 {
         self.xid.fetch_add(1, atomic::Ordering::SeqCst)
     }
@@ -234,14 +183,17 @@ impl Client {
         let mut frame = conn.read_frame().await?;
         let rsp = ConnectResponse::from_buffer(&mut frame)?;
         state.update_session(&rsp);
-        info!("Session established, timeout: {}ms, session id: {:#x}", rsp.timeout, rsp.session_id);
+        info!(
+            "Session established, timeout: {}ms, session id: {:#x}",
+            rsp.timeout, rsp.session_id
+        );
         // TODO: handle session expired
         Ok(())
     }
 
     async fn task_completion(
         token: CancellationToken,
-        mut rx: UnboundedReceiver<Event>,
+        mut rx: UnboundedReceiver<event::Event>,
         cb: OnEvent,
     ) {
         loop {
@@ -251,22 +203,18 @@ impl Client {
                 },
 
                 event = rx.recv() => {
-                    match event {
-                        Some(e) => {
-                            let now = Instant::now();
-                            {
-                                let Event { r#type, state, path } = e;
-                                cb(r#type, state, path);
-                            }
-                            let elapsed = Instant::now() - now;
-                            if elapsed > Duration::from_secs(1) {
-                                warn!("Slow callback execution detected");
-                            }
+                    if let Some(e) = event {
+                        let now = Instant::now();
+                        {
+                            let event::Event { r#type, state, path } = e;
+                            cb(r#type, state, path);
                         }
-
-                        None => {
-                            token.cancel();
+                        let elapsed = Instant::now() - now;
+                        if elapsed > Duration::from_secs(1) {
+                            warn!("Slow callback execution detected");
                         }
+                    } else {
+                        token.cancel();
                     }
                 }
             }
@@ -331,14 +279,11 @@ impl Client {
         state.update_last_send();
 
         // read connection response
-        if let Err(e) = tokio::time::timeout(
+        tokio::time::timeout(
             read_timeout,
-            Client::prime_connection_response(conn, &mut state, &config),
+            Client::prime_connection_response(conn, &mut state, &config)?,
         )
-        .await
-        {
-            return Err(io::Error::from(io::ErrorKind::TimedOut).into());
-        }
+        .await?;
 
         // start ping timer
         let mut interval = tokio::time::interval(write_timeout);
@@ -393,7 +338,7 @@ impl Client {
         config: Config,
         mut to_send: UnboundedReceiver<Request>,
         to_recv: UnboundedReceiver<Response>,
-        completion_tx: UnboundedSender<Event>,
+        completion_tx: UnboundedSender<event::Event>,
     ) {
         let Config {
             connect_timeout,
@@ -435,23 +380,12 @@ impl Client {
 
         info!("IO task exited");
     }
-}
 
-impl RequestHeader {
-    pub fn new(xid: i32, op: OpCode) -> Self {
-        Self {
-            xid,
-            r#type: op.into(),
-        }
-    }
-}
-
-impl Client {
-    pub async fn submit_request<T: Deserialize>(
+    pub async fn submit_request<Output: Deserialize>(
         &mut self,
         header: RequestHeader,
         body: Option<RequestBody>,
-    ) -> Result<T, anyhow::Error> {
+    ) -> Result<Output, anyhow::Error> {
         let (tx, rx) = oneshot::channel::<Response>();
         let req = Request {
             header,
@@ -460,7 +394,20 @@ impl Client {
         };
         self.req_tx.send(req)?;
         let rsp = rx.await?;
-        Ok(T::from_buffer(&mut rsp.payload.unwrap())?)
+        Ok(Output::from_buffer(&mut rsp.payload.unwrap())?)
+    }
+
+    pub async fn close(&mut self) -> Result<(), anyhow::Error> {
+        let req = Request {
+            header: RequestHeader {
+                xid: self.get_xid(),
+                r#type: OpCode::OpClose.into(),
+            },
+            payload: None,
+            wake: None,
+        };
+        self.req_tx.send(req)?;
+        Ok(())
     }
 
     pub async fn get(&mut self, path: &str, watch: bool) -> Result<GetDataResponse, anyhow::Error> {
@@ -472,5 +419,12 @@ impl Client {
             })),
         )
         .await
+    }
+}
+
+impl Drop for Client {
+    fn drop(&mut self) {
+        self.token.cancel();
+        task::block_in_place(async || while let _ = self.tasks.join_next().await {});
     }
 }

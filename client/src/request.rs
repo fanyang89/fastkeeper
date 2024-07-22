@@ -12,7 +12,7 @@ use crate::{
 pub struct Request {
     pub header: RequestHeader,
     pub payload: Option<RequestBody>,
-    pub wake: oneshot::Sender<Response>,
+    pub wake: Option<oneshot::Sender<Response>>,
 }
 
 impl SerializeToBuffer for Request {

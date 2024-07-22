@@ -1,5 +1,14 @@
 use jute::{Deserialize, SerializeToBuffer};
 
+impl proto::RequestHeader {
+    pub fn new(xid: i32, op: OpCode) -> Self {
+        Self {
+            xid,
+            r#type: op.into(),
+        }
+    }
+}
+
 pub enum RequestBody {
     Id(data::Id),
     ACL(data::ACL),

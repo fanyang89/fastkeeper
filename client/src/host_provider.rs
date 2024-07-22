@@ -1,28 +1,40 @@
 use rand::prelude::SliceRandom;
 
-use crate::client::ShuffleMode;
+#[derive(Clone, Debug, PartialEq)]
+pub enum ShuffleMode {
+    Disable,
+    Enable,
+    Once,
+}
 
 pub struct HostProvider {
     hosts: Vec<String>,
     next: usize,
     shuffle_mode: ShuffleMode,
+    shuffled: bool,
 }
 
 impl HostProvider {
     pub fn new(mut hosts: Vec<String>, shuffle_mode: &ShuffleMode) -> Self {
-        let mut p = Self {
+        let mut provider = Self {
             hosts,
             next: 0,
             shuffle_mode: shuffle_mode.clone(),
+            shuffled: false,
         };
-        if p.shuffle_mode != ShuffleMode::Disable {
-            p.shuffle();
-        }
-        p
+        provider.shuffle();
+        provider
     }
 
     pub fn shuffle(&mut self) {
-        self.hosts.shuffle(&mut rand::thread_rng());
+        if match self.shuffle_mode {
+            ShuffleMode::Disable => false,
+            ShuffleMode::Enable => true,
+            ShuffleMode::Once => !self.shuffled,
+        } {
+            self.hosts.shuffle(&mut rand::thread_rng());
+        }
+        self.shuffled = self.shuffle_mode == ShuffleMode::Once
     }
 }
 

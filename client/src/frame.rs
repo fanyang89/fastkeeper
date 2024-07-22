@@ -17,7 +17,6 @@ impl FrameReadWriter for TcpStream {
         self.read_exact(&mut size_buf).await?;
         let mut cursor = io::Cursor::new(size_buf);
         let size = ReadBytesExt::read_u32::<BigEndian>(&mut cursor).unwrap();
-        trace!("read frame len: {}", size);
 
         // read buf
         let mut buf: Vec<u8> = vec![0u8; size as usize];

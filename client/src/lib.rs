@@ -9,3 +9,4 @@ pub mod host_provider;
 pub mod messages;
 pub mod request;
 pub mod response;
+pub mod event;

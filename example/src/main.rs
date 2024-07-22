@@ -1,7 +1,8 @@
 use clap::Parser;
 use std::time::Duration;
 use zookeeper::{
-    client::{Client, Config, EventType, State},
+    client::{Client, Config},
+    event,
     messages::proto::GetDataResponse,
 };
 
@@ -11,7 +12,7 @@ struct Cli {
     hosts: Vec<String>,
 }
 
-fn on_event(event_type: EventType, state: State, path: String) {
+fn on_event(event_type: event::Type, state: event::State, path: String) {
     println!("type: {}, state: {}, path: {}", event_type, state, path);
 }
 
