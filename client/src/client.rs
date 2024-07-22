@@ -3,7 +3,7 @@ use std::future::Future;
 use std::io;
 use std::sync::atomic::{self, AtomicI32};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use anyhow::anyhow;
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
@@ -73,6 +73,7 @@ pub enum ShuffleMode {
 pub struct Config {
     pub shuffle_mode: ShuffleMode,
     pub connect_timeout: Duration,
+    pub connect_attempt: Option<Duration>,
     pub completion_warn_timeout: Duration,
     pub session_timeout: Duration,
     pub read_only: bool,
@@ -85,6 +86,7 @@ impl Default for Config {
         Self {
             shuffle_mode: ShuffleMode::Enable,
             connect_timeout: Duration::from_secs(1),
+            connect_attempt: None,
             completion_warn_timeout: Duration::from_secs(1),
             session_timeout: Duration::from_secs(10),
             read_only: false,
@@ -341,7 +343,7 @@ impl Client {
 
         // io loop
         loop {
-            tokio::select! {
+            select! {
                 _ = token.cancelled() => {
                     break;
                 }
@@ -355,7 +357,7 @@ impl Client {
                 _ = interval.tick() => {
                     let now = Instant::now();
                     if now - state.last_send >= write_timeout {
-                        Client::send_ping(&conn).await;
+                        Client::send_ping(&conn).await?;
                         state.update_last_send();
                     }
                 }
@@ -417,9 +419,9 @@ impl Client {
                         },
 
                         Err(e) => {
-                            warn!("Connect to {} failed, error: {}", host, e);
+                            warn!("Connect failed, error: {}", e);
                             let connect_elapsed = Instant::now() - connect_start;
-                            let connect_step = session_timeout / 3;
+                            let connect_step = config.connect_attempt.unwrap_or(session_timeout / 3);
                             if connect_step > connect_elapsed {
                                 sleep(connect_step - connect_elapsed).await;
                             }

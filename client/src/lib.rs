@@ -3,9 +3,9 @@
 
 pub mod c;
 pub mod client;
+pub mod error;
 pub mod frame;
 pub mod host_provider;
 pub mod messages;
-pub mod error;
-pub mod response;
 pub mod request;
+pub mod response;

@@ -19,8 +19,10 @@ fn on_event(event_type: EventType, state: State, path: String) {
 async fn main() -> Result<(), anyhow::Error> {
     let cli = Cli::parse();
     tracing_subscriber::fmt::init();
-    let mut config = Config::default();
-    config.connect_attempt = Some(Duration::from_secs(1));
+    let config = Config {
+        connect_attempt: Some(Duration::from_secs(1)),
+        ..Config::default()
+    };
     let mut conn = Client::new(&cli.hosts, Box::new(on_event), config)?;
     let GetDataResponse { data, stat } = conn.get("/zookeeper/config", false).await?;
     println!("Config: {:?}, stat: {:?}", data, stat);

@@ -3,6 +3,7 @@ use std::io;
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use bytes::Bytes;
 use tokio::{io::AsyncReadExt, net::TcpStream};
+use tracing::{info, trace};
 
 pub(crate) trait FrameReadWriter {
     async fn read_frame(&mut self) -> Result<Bytes, anyhow::Error>;
@@ -16,6 +17,7 @@ impl FrameReadWriter for TcpStream {
         self.read_exact(&mut size_buf).await?;
         let mut cursor = io::Cursor::new(size_buf);
         let size = ReadBytesExt::read_u32::<BigEndian>(&mut cursor).unwrap();
+        trace!("read frame len: {}", size);
 
         // read buf
         let mut buf: Vec<u8> = Vec::with_capacity(size as usize);
