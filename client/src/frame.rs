@@ -20,7 +20,7 @@ impl FrameReadWriter for TcpStream {
         trace!("read frame len: {}", size);
 
         // read buf
-        let mut buf: Vec<u8> = Vec::with_capacity(size as usize);
+        let mut buf: Vec<u8> = vec![0u8; size as usize];
         self.read_exact(&mut buf).await?;
         Ok(Bytes::from(buf))
     }

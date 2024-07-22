@@ -234,6 +234,7 @@ impl Client {
         let mut frame = conn.read_frame().await?;
         let rsp = ConnectResponse::from_buffer(&mut frame)?;
         state.update_session(&rsp);
+        info!("Session established, timeout: {}ms, session id: {:#x}", rsp.timeout, rsp.session_id);
         // TODO: handle session expired
         Ok(())
     }
@@ -284,6 +285,7 @@ impl Client {
                 let mut buf = BytesMut::with_capacity(size as usize);
                 conn.read_exact(&mut buf).await?;
                 let b = buf.freeze();
+                todo!()
             }
             Err(e) => {
                 return Err(e.into());
