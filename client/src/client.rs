@@ -117,6 +117,10 @@ impl ProcessState {
         self.inner.lock().unwrap().last_zxid
     }
 
+    pub fn session_id(&self) -> i64 {
+        self.inner.lock().unwrap().session_id
+    }
+
     pub fn update_session(&mut self, rsp: &ConnectResponse) {
         let mut inner = self.inner.lock().unwrap();
         inner.session_id = rsp.session_id;
@@ -222,12 +226,18 @@ impl Client {
     ) -> Result<(), anyhow::Error> {
         let mut frame = conn.read_frame().await?;
         let rsp = ConnectResponse::from_buffer(&mut frame)?;
-        state.update_session(&rsp);
-        info!(
-            "Session established, timeout: {}ms, session id: {:#x}",
-            rsp.timeout, rsp.session_id
-        );
-        // TODO: handle session expired
+        let old_id = state.session_id();
+        let new_id = rsp.session_id;
+        if old_id != 0 && new_id != old_id {
+            // session expired
+            // TODO: send session expired event, close connection
+        } else {
+            state.update_session(&rsp);
+            info!(
+                "Session established, timeout: {}ms, session id: {:#x}",
+                rsp.timeout, rsp.session_id
+            );
+        }
         Ok(())
     }
 
@@ -263,7 +273,7 @@ impl Client {
         info!("Completion task exited");
     }
 
-    async fn do_read(mut conn: &mut TcpStream) -> Result<(), anyhow::Error> {
+    async fn read_response(mut conn: &mut TcpStream) -> Result<(), anyhow::Error> {
         // read buffer from socket
         let mut size_buf = [0u8; 4];
         match conn.read_exact(&mut size_buf).await {
@@ -283,7 +293,7 @@ impl Client {
         Ok(())
     }
 
-    async fn do_write(
+    async fn drain_send_queue(
         mut conn: &mut TcpStream,
         timeout: Duration,
         mut to_send: &mut UnboundedReceiver<Request>,
@@ -339,7 +349,7 @@ impl Client {
                 }
 
                 _ = conn.readable() => {
-                    if let Err(e) = tokio::time::timeout(read_timeout, Client::do_read(&mut conn)).await? {
+                    if let Err(e) = tokio::time::timeout(read_timeout, Client::read_response(&mut conn)).await? {
                         error!("Read failed, {}", e);
                     }
                 }
@@ -353,7 +363,7 @@ impl Client {
                 }
 
                 _ = conn.writable() => {
-                    if let Err(e) = Self::do_write(&mut conn, write_timeout, &mut to_send).await {
+                    if let Err(e) = Self::drain_send_queue(&mut conn, write_timeout, &mut to_send).await {
                         error!("Write failed, {}", e);
                     }
                     state.update_last_send();
