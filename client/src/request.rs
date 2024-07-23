@@ -1,8 +1,8 @@
-use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
+use bytes::BufMut;
 use bytes::BytesMut;
-use bytes::{Buf, BufMut, Bytes};
-use jute::SerializeToBuffer;
 use tokio::sync::oneshot;
+
+use jute::SerializeToBuffer;
 
 use crate::{
     messages::{proto::RequestHeader, RequestBody},
@@ -12,7 +12,7 @@ use crate::{
 pub struct Request {
     pub header: RequestHeader,
     pub payload: Option<RequestBody>,
-    pub wake: Option<oneshot::Sender<Response>>,
+    pub wake: Option<oneshot::Sender<Response>>, // None for send and leave
 }
 
 impl SerializeToBuffer for Request {

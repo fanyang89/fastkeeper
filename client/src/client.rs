@@ -14,6 +14,7 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::mpsc::{self, UnboundedSender};
 use tokio::sync::oneshot;
+use tokio::sync::oneshot::Sender;
 use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::error::Elapsed;
 use tokio::time::{sleep, Instant, Timeout};
@@ -21,127 +22,27 @@ use tokio::{runtime, select, task, time};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, trace, warn};
 
+use crate::config::Config;
 use crate::error::ClientError;
 use crate::event;
 use crate::frame::FrameReadWriter;
-use crate::host_provider::{HostProvider, ShuffleMode};
+use crate::hosts::{Hosts, ShuffleMode};
 use crate::messages::proto::{
     ConnectRequest, ConnectResponse, GetDataRequest, GetDataResponse, ReplyHeader, RequestHeader,
 };
 use crate::messages::{self, data, proto, OpCode, RequestBody};
 use crate::request::Request;
 use crate::response::Response;
+use crate::state::ProcessState;
 use jute::{Deserialize, Serialize, SerializeToBuffer};
 
-#[derive(Clone, Debug)]
-pub struct Config {
-    pub shuffle_mode: ShuffleMode,
-    pub connect_timeout: Duration,
-    pub connect_attempt: Option<Duration>,
-    pub completion_warn_timeout: Duration,
-    pub session_timeout: Duration,
-    pub read_only: bool,
-    pub worker_threads: usize,
-    pub max_blocking_threads: usize,
-    pub send_session_close_timeout: Duration,
-    pub wait_close_timeout: Duration,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            shuffle_mode: ShuffleMode::Enable,
-            connect_timeout: Duration::from_secs(1),
-            connect_attempt: None,
-            completion_warn_timeout: Duration::from_secs(1),
-            session_timeout: Duration::from_secs(10),
-            read_only: false,
-            worker_threads: 1,
-            max_blocking_threads: 1,
-            send_session_close_timeout: Duration::from_secs(3),
-            wait_close_timeout: Duration::from_millis(1500),
-        }
-    }
-}
-
 pub type OnEvent = Box<dyn Fn(event::Type, event::State, String) + Send>; // type, state, path
-
-struct ProcessState {
-    inner: Arc<Mutex<ProcessStateInner>>,
-}
-
-impl Clone for ProcessState {
-    fn clone(&self) -> Self {
-        Self {
-            inner: self.inner.clone(),
-        }
-    }
-}
-
-#[derive(Clone)]
-struct ProcessStateInner {
-    last_zxid: i64,
-    session_id: i64,
-    passwd: jute::Buffer,
-    last_send: Instant,
-    xid: i32,
-}
-
-impl ProcessState {
-    pub fn new() -> Self {
-        Self {
-            inner: Arc::new(Mutex::new(ProcessStateInner {
-                last_zxid: 0,
-                session_id: 0,
-                passwd: Vec::with_capacity(16),
-                last_send: Instant::now(),
-                xid: random::<i32>(),
-            })),
-        }
-    }
-
-    pub fn inner(&self) -> ProcessStateInner {
-        self.inner.lock().unwrap().clone()
-    }
-
-    pub fn update_last_send(&mut self) {
-        let mut inner = self.inner.lock().unwrap();
-        inner.last_send = Instant::now();
-    }
-
-    pub fn last_send(&self) -> Instant {
-        self.inner.lock().unwrap().last_send
-    }
-
-    pub fn last_zxid(&self) -> i64 {
-        self.inner.lock().unwrap().last_zxid
-    }
-
-    pub fn session_id(&self) -> i64 {
-        self.inner.lock().unwrap().session_id
-    }
-
-    pub fn update_session(&mut self, rsp: &ConnectResponse) {
-        let mut inner = self.inner.lock().unwrap();
-        inner.session_id = rsp.session_id;
-        inner.passwd = rsp.passwd.clone();
-    }
-
-    pub fn get_xid(&mut self) -> i32 {
-        let mut inner = self.inner.lock().unwrap();
-        let xid = inner.xid;
-        inner.xid += 1;
-        xid
-    }
-}
 
 pub struct Client {
     runtime: runtime::Runtime,
     token: CancellationToken,
     tasks: JoinSet<()>,
-    completion_tx: UnboundedSender<event::Event>,
     req_tx: UnboundedSender<Request>,
-    rsp_tx: UnboundedSender<Response>,
     state: ProcessState,
 }
 
@@ -157,32 +58,32 @@ impl Client {
             .enable_all()
             .build()
             .unwrap();
-
         let token = CancellationToken::new();
         let mut tasks = JoinSet::new();
-
-        let (completion_tx, completion_rx) = mpsc::unbounded_channel::<event::Event>();
-        tasks.spawn(Client::task_completion(token.clone(), completion_rx, cb));
-
-        let (req_tx, req_rx) = mpsc::unbounded_channel::<Request>();
-        let (rsp_tx, rsp_rx) = mpsc::unbounded_channel::<Response>();
         let state = ProcessState::new();
+        // send event from task-io to task-completion
+        let (event_tx, event_rx) = mpsc::unbounded_channel::<event::Event>();
+        // send request from guest to task-io
+        let (req_tx, req_rx) = mpsc::unbounded_channel::<Request>();
+        // send response from task-io to task-completion
+        let (rsp_tx, rsp_rx) = mpsc::unbounded_channel::<(oneshot::Sender<Response>, Response)>();
+
+        tasks.spawn_blocking(Client::task_completion(token.clone(), event_rx, rsp_rx, cb));
+
         tasks.spawn(Client::task_io(
+            config.clone(),
             state.clone(),
             token.clone(),
-            HostProvider::new(hosts.clone(), &config.shuffle_mode),
-            config.clone(),
+            Hosts::new(hosts.clone(), &config.shuffle_mode),
             req_rx,
-            rsp_rx,
-            completion_tx.clone(),
+            rsp_tx,
+            event_tx.clone(),
         ));
 
         Ok(Client {
             runtime,
             token,
             tasks,
-            completion_tx,
-            rsp_tx,
             req_tx,
             state,
         })
@@ -243,8 +144,9 @@ impl Client {
 
     async fn task_completion(
         token: CancellationToken,
-        mut rx: UnboundedReceiver<event::Event>,
-        cb: OnEvent,
+        mut event_rx: UnboundedReceiver<event::Event>,
+        mut rsp_rx: UnboundedReceiver<(oneshot::Sender<Response>, Response)>,
+        on_event: OnEvent,
     ) {
         loop {
             select! {
@@ -252,19 +154,20 @@ impl Client {
                     break;
                 },
 
-                event = rx.recv() => {
+                event = event_rx.recv() => {
                     if let Some(e) = event {
                         let now = Instant::now();
-                        {
-                            let event::Event { r#type, state, path } = e;
-                            cb(r#type, state, path);
-                        }
+                        on_event(e.r#type, e.state, e.path);
                         let elapsed = Instant::now() - now;
                         if elapsed > Duration::from_secs(1) {
                             warn!("Slow callback execution detected");
                         }
-                    } else {
-                        token.cancel();
+                    }
+                }
+
+                r = rsp_rx.recv() => {
+                    if let Some((wake, rsp)) = r {
+                        wake.send(rsp).unwrap();
                     }
                 }
             }
@@ -374,7 +277,7 @@ impl Client {
         // send session close
         time::timeout(
             send_session_close_timeout,
-            Self::send_close(state.get_xid(), conn),
+            Self::close_session(state.get_xid(), conn),
         )
         .await??;
 
@@ -396,13 +299,13 @@ impl Client {
 
     // io task
     async fn task_io(
+        config: Config,
         mut state: ProcessState,
         token: CancellationToken,
-        mut host_provider: HostProvider,
-        config: Config,
+        mut host_provider: Hosts,
         mut to_send: UnboundedReceiver<Request>,
-        to_recv: UnboundedReceiver<Response>,
-        completion_tx: UnboundedSender<event::Event>,
+        mut to_recv: UnboundedSender<(Sender<Response>, Response)>,
+        mut completion_tx: UnboundedSender<event::Event>,
     ) {
         let Config {
             connect_timeout,
@@ -444,6 +347,12 @@ impl Client {
         info!("IO task exited");
     }
 
+    fn get_xid(&mut self) -> i32 {
+        self.state.get_xid()
+    }
+}
+
+impl Client {
     pub async fn submit_request<Output: Deserialize>(
         &mut self,
         header: RequestHeader,
@@ -460,7 +369,7 @@ impl Client {
         Ok(Output::from_buffer(&mut rsp.payload.unwrap())?)
     }
 
-    pub async fn send_close(xid: i32, mut conn: &mut TcpStream) -> Result<(), anyhow::Error> {
+    pub async fn close_session(xid: i32, mut conn: &mut TcpStream) -> Result<(), anyhow::Error> {
         conn.writable().await?;
         let req = Request {
             header: RequestHeader {
@@ -484,10 +393,6 @@ impl Client {
             })),
         )
         .await
-    }
-
-    fn get_xid(&mut self) -> i32 {
-        self.state.get_xid()
     }
 }
 

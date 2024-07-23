@@ -7,14 +7,14 @@ pub enum ShuffleMode {
     Once,
 }
 
-pub struct HostProvider {
+pub struct Hosts {
     hosts: Vec<String>,
     next: usize,
     shuffle_mode: ShuffleMode,
     shuffled: bool,
 }
 
-impl HostProvider {
+impl Hosts {
     pub fn new(mut hosts: Vec<String>, shuffle_mode: &ShuffleMode) -> Self {
         let mut provider = Self {
             hosts,
@@ -38,7 +38,7 @@ impl HostProvider {
     }
 }
 
-impl Iterator for HostProvider {
+impl Iterator for Hosts {
     type Item = String;
 
     fn next(&mut self) -> Option<Self::Item> {

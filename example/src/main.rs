@@ -1,10 +1,11 @@
 use clap::Parser;
 use std::time::Duration;
 use zookeeper::{
-    client::{Client, Config},
+    client::Client,
     event,
     messages::proto::GetDataResponse,
 };
+use zookeeper::config::Config;
 
 #[derive(Parser)]
 #[command(version, about, long_about = None, arg_required_else_help = true)]
