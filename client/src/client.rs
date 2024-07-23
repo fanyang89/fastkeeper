@@ -43,6 +43,8 @@ pub struct Config {
     pub read_only: bool,
     pub worker_threads: usize,
     pub max_blocking_threads: usize,
+    pub send_session_close_timeout: Duration,
+    pub wait_close_timeout: Duration,
 }
 
 impl Default for Config {
@@ -56,6 +58,8 @@ impl Default for Config {
             read_only: false,
             worker_threads: 1,
             max_blocking_threads: 1,
+            send_session_close_timeout: Duration::from_secs(3),
+            wait_close_timeout: Duration::from_millis(1500),
         }
     }
 }
@@ -302,7 +306,10 @@ impl Client {
         mut to_send: &mut UnboundedReceiver<Request>,
     ) -> Result<(), anyhow::Error> {
         let Config {
-            session_timeout, ..
+            session_timeout,
+            send_session_close_timeout,
+            wait_close_timeout,
+            ..
         } = config;
 
         let read_timeout = session_timeout / 3 * 2;
@@ -354,15 +361,15 @@ impl Client {
             }
         }
 
-        // send close session in 3s
+        // send session close
         time::timeout(
-            Duration::from_secs(3),
+            send_session_close_timeout,
             Self::send_close(state.get_xid(), conn),
         )
         .await??;
 
-        // wait for connection readable in 1.5s
-        time::timeout(Duration::from_millis(1500), conn.readable()).await??;
+        // wait for connection readable
+        time::timeout(wait_close_timeout, conn.readable()).await??;
 
         Ok(())
     }
