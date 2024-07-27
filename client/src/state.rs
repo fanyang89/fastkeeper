@@ -1,7 +1,7 @@
+use crate::messages::proto::ConnectResponse;
+use rand::random;
 use std::sync::{Arc, Mutex};
 use tokio::time::Instant;
-use rand::random;
-use crate::messages::proto::ConnectResponse;
 
 pub struct ProcessState {
     inner: Arc<Mutex<ProcessStateInner>>,
@@ -23,6 +23,7 @@ impl ProcessState {
                 session_id: 0,
                 passwd: Vec::with_capacity(16),
                 last_send: Instant::now(),
+                last_read: Instant::now(),
                 xid: random::<i32>(),
             })),
         }
@@ -35,6 +36,11 @@ impl ProcessState {
     pub fn update_last_send(&mut self) {
         let mut inner = self.inner.lock().unwrap();
         inner.last_send = Instant::now();
+    }
+
+    pub fn update_last_recv(&mut self) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.last_read = Instant::now();
     }
 
     pub fn last_send(&self) -> Instant {
@@ -69,5 +75,6 @@ pub struct ProcessStateInner {
     pub session_id: i64,
     pub passwd: jute::Buffer,
     pub last_send: Instant,
+    pub last_read: Instant,
     pub xid: i32,
 }

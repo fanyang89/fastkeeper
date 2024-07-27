@@ -2,6 +2,7 @@ use crate::{error::ClientError, messages::proto::ReplyHeader};
 use bytes::Bytes;
 use jute::Deserialize;
 
+#[derive(Debug)]
 pub struct Response {
     pub header: ReplyHeader,
     pub payload: Option<Bytes>,
