@@ -5,7 +5,7 @@ use jute::Deserialize;
 #[derive(Debug)]
 pub struct Response {
     pub header: ReplyHeader,
-    pub payload: Option<Bytes>,
+    pub body: Option<Bytes>,
 }
 
 impl Deserialize for Response {
@@ -14,7 +14,7 @@ impl Deserialize for Response {
         Self: Sized,
     {
         let header = ReplyHeader::from_buffer(&mut buf)?;
-        let payload = if let Some(size_buf) = buf.get(0..4) {
+        let body = if let Some(size_buf) = buf.get(0..4) {
             let size = u32::from_be_bytes(size_buf.try_into()?) as usize;
             let data: Vec<u8> = buf
                 .get(4..size)
@@ -24,14 +24,14 @@ impl Deserialize for Response {
         } else {
             None
         };
-        Ok(Self { header, payload })
+        Ok(Self { header, body })
     }
 }
 
 impl Response {
     pub fn get_message<T: Deserialize>(&mut self) -> Result<T, anyhow::Error> {
-        let Response { payload, .. } = self;
-        if let Some(buf) = payload {
+        let Response { body, .. } = self;
+        if let Some(buf) = body {
             T::from_buffer(buf)
         } else {
             Err(ClientError::EmptyResponseBody.into())

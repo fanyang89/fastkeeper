@@ -396,12 +396,12 @@ impl Client {
         let (tx, rx) = oneshot::channel::<Response>();
         let req = Request {
             header,
-            payload: body,
+            body,
             wake: Some(tx),
         };
         self.req_tx.send(req)?;
         let rsp = rx.await?;
-        Ok(Output::from_buffer(&mut rsp.payload.unwrap())?)
+        Ok(Output::from_buffer(&mut rsp.body.unwrap())?)
     }
 
     pub async fn close_session(xid: i32, mut conn: &mut TcpStream) -> Result<(), Error> {
@@ -411,7 +411,7 @@ impl Client {
                 xid,
                 r#type: OpCode::OpClose.into(),
             },
-            payload: None,
+            body: None,
             wake: None,
         };
         conn.write_frame(&req.to_buffer().freeze()).await?;
