@@ -7,6 +7,5 @@ edition = "2021"
 path = "src/lib.rs"
 
 [dependencies]
-anyhow = "1.0.86"
 bytes = { version = "1.6.0" }
 thiserror = "1.0.61"

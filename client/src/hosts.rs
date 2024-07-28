@@ -1,4 +1,5 @@
 use rand::prelude::SliceRandom;
+use std::ops::Add;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum ShuffleMode {
@@ -50,6 +51,11 @@ impl Iterator for Hosts {
                 self.shuffle();
             }
         }
-        Some(self.hosts[i].clone())
+        let mut host = self.hosts[i].clone();
+        if !host.contains(":") {
+            Some(host.add(":2181"))
+        } else {
+            Some(host)
+        }
     }
 }

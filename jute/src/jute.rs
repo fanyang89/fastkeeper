@@ -1,45 +1,40 @@
+use crate::error::JuteError;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use std::collections::HashMap;
 use std::hash::Hash;
 
-#[derive(thiserror::Error, Debug)]
-pub enum Error {
-    #[error("End of buffer")]
-    Eof,
-}
-
 pub trait Deserialize: Send {
-    fn from_buffer(buf: &mut Bytes) -> Result<Self, anyhow::Error>
+    fn from_buffer(buf: &mut Bytes) -> Result<Self, JuteError>
     where
         Self: Sized;
 }
 
 impl Deserialize for bool {
-    fn from_buffer(buf: &mut Bytes) -> Result<Self, anyhow::Error> {
+    fn from_buffer(buf: &mut Bytes) -> Result<Self, JuteError> {
         Ok(buf.get_u8() == 1)
     }
 }
 
 impl Deserialize for i32 {
-    fn from_buffer(buf: &mut Bytes) -> Result<Self, anyhow::Error> {
+    fn from_buffer(buf: &mut Bytes) -> Result<Self, JuteError> {
         Ok(buf.get_i32())
     }
 }
 
 impl Deserialize for i64 {
-    fn from_buffer(buf: &mut Bytes) -> Result<Self, anyhow::Error> {
+    fn from_buffer(buf: &mut Bytes) -> Result<Self, JuteError> {
         Ok(buf.get_i64())
     }
 }
 
 impl Deserialize for f32 {
-    fn from_buffer(buf: &mut Bytes) -> Result<Self, anyhow::Error> {
+    fn from_buffer(buf: &mut Bytes) -> Result<Self, JuteError> {
         Ok(buf.get_f32())
     }
 }
 
 impl Deserialize for f64 {
-    fn from_buffer(buf: &mut Bytes) -> Result<Self, anyhow::Error> {
+    fn from_buffer(buf: &mut Bytes) -> Result<Self, JuteError> {
         Ok(buf.get_f64())
     }
 }
@@ -47,17 +42,16 @@ impl Deserialize for f64 {
 pub type Buffer = Vec<u8>;
 
 impl Deserialize for Buffer {
-    fn from_buffer(buf: &mut Bytes) -> Result<Self, anyhow::Error> {
+    fn from_buffer(buf: &mut Bytes) -> Result<Self, JuteError> {
         let size: usize = i32::from_buffer(buf)? as usize;
-        let b = buf.get(0..size).ok_or(Error::Eof)?;
-        Ok(b.to_vec())
+        Ok(buf.get(0..size).ok_or_else(|| JuteError::Eof)?.to_vec())
     }
 }
 
 impl Deserialize for String {
-    fn from_buffer(buf: &mut Bytes) -> Result<Self, anyhow::Error> {
+    fn from_buffer(buf: &mut Bytes) -> Result<Self, JuteError> {
         let b = Vec::<u8>::from_buffer(buf)?;
-        Ok(String::from_utf8(b)?)
+        String::from_utf8(b).map_err(JuteError::FromUtf8Error)
     }
 }
 
@@ -65,7 +59,7 @@ impl<T> Deserialize for Vec<T>
 where
     T: Deserialize,
 {
-    fn from_buffer(buf: &mut Bytes) -> Result<Self, anyhow::Error> {
+    fn from_buffer(buf: &mut Bytes) -> Result<Self, JuteError> {
         let size: usize = i32::from_buffer(buf)? as usize;
         let mut b = Vec::new();
         for _ in 0..size {
@@ -76,7 +70,7 @@ where
 }
 
 impl<K: Deserialize + Hash + Eq, V: Deserialize> Deserialize for HashMap<K, V> {
-    fn from_buffer(buf: &mut Bytes) -> Result<Self, anyhow::Error> {
+    fn from_buffer(buf: &mut Bytes) -> Result<Self, JuteError> {
         let size: usize = i32::from_buffer(buf)? as usize;
         let mut m = HashMap::new();
         for _ in 0..size {
@@ -185,7 +179,7 @@ macro_rules! jute_message {
         }
 
         impl jute::Deserialize for $name {
-            fn from_buffer(buf: &mut jute::Bytes) -> Result<Self, anyhow::Error> {
+            fn from_buffer(buf: &mut jute::Bytes) -> Result<Self, jute::JuteError> {
                 Ok($name {
                     $($field_name : <$field_type>::from_buffer(buf)?, )*
                 })

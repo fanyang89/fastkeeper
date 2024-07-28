@@ -73,7 +73,7 @@ impl Client {
         // send event from task-io to task-completion
         let (event_tx, event_rx) = mpsc::unbounded_channel::<Event>();
         // send waker from task-io to task-completion
-        let (wake_tx, wake_rx) = mpsc::unbounded_channel::<Sender<Response>>();
+        let (wake_tx, wake_rx) = mpsc::unbounded_channel::<Request>();
         // send response from task-io to task-completion
         let (rsp_tx, rsp_rx) = mpsc::unbounded_channel::<Response>();
 
@@ -166,7 +166,7 @@ impl Client {
         on_event: &'static OnEvent,
         config: Config,
         mut event_rx: UnboundedReceiver<Event>,
-        mut wake_rx: UnboundedReceiver<Sender<Response>>,
+        mut wake_rx: UnboundedReceiver<Request>,
         mut rsp_rx: UnboundedReceiver<Response>,
     ) {
         let Config {
@@ -192,8 +192,8 @@ impl Client {
 
                 response = rsp_rx.recv() => {
                     if let Some(rsp) = response {
-                        let wake = wake_rx.recv().await.unwrap();
-                        wake.send(rsp).unwrap();
+                        let req = wake_rx.recv().await.unwrap();
+                        req.wake.unwrap().send(rsp).unwrap();
                     }
                 }
             }
@@ -227,16 +227,14 @@ impl Client {
     async fn send_all(
         mut conn: &mut TcpStream,
         mut to_send: &mut UnboundedReceiver<Request>,
-        mut to_recv: &mut UnboundedSender<Sender<Response>>,
+        mut to_recv: &mut UnboundedSender<Request>,
     ) -> Result<(), Error> {
         let size = to_send.len();
         for _ in 0..size {
             if let Some(req) = to_send.recv().await {
                 let mut buf = req.to_buffer();
                 conn.write_all_buf(&mut buf).await?;
-                if let Some(wake) = req.wake {
-                    to_recv.send(wake)?;
-                }
+                to_recv.send(req)?;
             }
         }
         Ok(())
@@ -248,7 +246,7 @@ impl Client {
         config: Config,
         token: CancellationToken,
         to_send: &mut UnboundedReceiver<Request>,
-        to_recv: &mut UnboundedSender<Sender<Response>>,
+        to_recv: &mut UnboundedSender<Request>,
         completion_tx: &mut UnboundedSender<Event>,
     ) -> Result<(), Error> {
         let Config {
@@ -309,7 +307,7 @@ impl Client {
         // send session close
         time::timeout(
             send_session_close_timeout,
-            Self::close_session(state.get_xid(), conn),
+            Self::close_session(conn, state.get_xid()),
         )
         .await??;
 
@@ -336,7 +334,7 @@ impl Client {
         token: CancellationToken,
         mut host_provider: Hosts,
         mut to_send: UnboundedReceiver<Request>,
-        mut to_recv: UnboundedSender<Sender<Response>>,
+        mut to_recv: UnboundedSender<Request>,
         mut completion_tx: UnboundedSender<Event>,
         rsp_tx: UnboundedSender<Response>,
     ) {
@@ -393,18 +391,19 @@ impl Client {
         header: RequestHeader,
         body: Option<RequestBody>,
     ) -> Result<Output, Error> {
-        let (tx, rx) = oneshot::channel::<Response>();
-        let req = Request {
-            header,
-            body,
-            wake: Some(tx),
-        };
-        self.req_tx.send(req)?;
-        let rsp = rx.await?;
+        let (wake_tx, wake_rx) = oneshot::channel::<Response>();
+        self.req_tx
+            .send(Request {
+                header,
+                body,
+                wake: Some(wake_tx),
+            })
+            .unwrap();
+        let rsp: Response = wake_rx.await?;
         Ok(Output::from_buffer(&mut rsp.body.unwrap())?)
     }
 
-    pub async fn close_session(xid: i32, mut conn: &mut TcpStream) -> Result<(), Error> {
+    pub async fn close_session(mut conn: &mut TcpStream, xid: i32) -> Result<(), Error> {
         conn.writable().await?;
         let req = Request {
             header: RequestHeader {

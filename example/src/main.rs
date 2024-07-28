@@ -1,11 +1,7 @@
 use clap::Parser;
-
-use zookeeper::{
-    client::Client,
-    event,
-    messages::proto::GetDataResponse,
-};
+use tracing::info;
 use zookeeper::config::Config;
+use zookeeper::{client::Client, event, messages::proto::GetDataResponse};
 
 #[derive(Parser)]
 #[command(version, about, long_about = None, arg_required_else_help = true)]
@@ -14,7 +10,10 @@ struct Cli {
 }
 
 fn on_event(event_type: event::Type, state: event::State, path: String) {
-    println!("type: {}, state: {}, path: {}", event_type, state, path);
+    info!(
+        "New event arrived, type: {}, state: {}, path: '{}'",
+        event_type, state, path
+    );
 }
 
 #[tokio::main]
@@ -24,6 +23,6 @@ async fn main() -> Result<(), anyhow::Error> {
     let config = Config::default();
     let mut conn = Client::new(&cli.hosts, &on_event, config)?;
     let GetDataResponse { data, stat } = conn.get("/zookeeper/config", false).await?;
-    println!("Config: {:?}, stat: {:?}", data, stat);
+    info!("Config: {:?}, stat: {:?}", data, stat);
     Ok(())
 }

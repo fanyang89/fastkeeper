@@ -22,7 +22,7 @@ impl Default for Config {
             connect_timeout: Duration::from_secs(1),
             connect_attempt: Some(Duration::from_secs(1)),
             completion_warn_timeout: Duration::from_secs(1),
-            session_timeout: Duration::from_secs(10),
+            session_timeout: Duration::from_secs(6),
             read_only: false,
             worker_threads: 1,
             max_blocking_threads: 1,
