@@ -1,17 +1,18 @@
 use std::io;
 
+use crate::error::ClientError;
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use bytes::Bytes;
 use tokio::{io::AsyncReadExt, net::TcpStream};
 use tracing::{info, trace};
 
 pub(crate) trait FrameReadWriter {
-    async fn read_frame(&mut self) -> Result<Bytes, anyhow::Error>;
-    async fn write_frame(&self, buf: &Bytes) -> Result<(), anyhow::Error>;
+    async fn read_frame(&mut self) -> Result<Bytes, ClientError>;
+    async fn write_frame(&self, buf: &Bytes) -> Result<(), ClientError>;
 }
 
 impl FrameReadWriter for TcpStream {
-    async fn read_frame(&mut self) -> Result<Bytes, anyhow::Error> {
+    async fn read_frame(&mut self) -> Result<Bytes, ClientError> {
         // read buf size
         let mut size_buf = [0u8; 4];
         self.read_exact(&mut size_buf).await?;
@@ -24,7 +25,7 @@ impl FrameReadWriter for TcpStream {
         Ok(Bytes::from(buf))
     }
 
-    async fn write_frame(&self, buf: &Bytes) -> Result<(), anyhow::Error> {
+    async fn write_frame(&self, buf: &Bytes) -> Result<(), ClientError> {
         let mut size_buf = Vec::with_capacity(4);
         size_buf.write_u32::<BigEndian>(buf.len() as u32)?;
         self.try_write(&size_buf)?;

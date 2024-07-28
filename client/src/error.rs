@@ -1,5 +1,6 @@
 use crate::request::Request;
 use jute::JuteError;
+use std::io;
 use std::sync::mpsc;
 use thiserror::Error;
 
@@ -14,7 +15,7 @@ pub enum ClientError {
     #[error("invalid config")]
     InvalidConfig,
 
-    #[error("unknown error, {0}")]
+    #[error("anyhow error, {0}")]
     UnknownError(anyhow::Error),
 
     #[error("request send failed, {0}")]
@@ -23,6 +24,15 @@ pub enum ClientError {
     #[error("response recv failed, {0}")]
     RecvError(#[from] mpsc::RecvError),
 
-    #[error("{0}")]
+    #[error("jute error: {0}")]
     JuteError(#[from] JuteError),
+
+    #[error("session expired")]
+    SessionExpired,
+
+    #[error("io error, {0}")]
+    IoError(#[from] io::Error),
+
+    #[error("timeout {0}")]
+    TimeoutError(#[from] tokio::time::error::Elapsed),
 }

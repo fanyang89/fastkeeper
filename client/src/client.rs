@@ -11,7 +11,7 @@ use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use rand::prelude::IteratorRandom;
 use rand::{random, thread_rng, Rng};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, Interest};
 use tokio::net::TcpStream;
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -38,7 +38,7 @@ use crate::messages::{self, data, proto, OpCode, RequestBody};
 use crate::request::Request;
 use crate::response::Response;
 use crate::state::ProcessState;
-use jute::{Deserialize, Serialize, SerializeToBuffer};
+use jute::{Deserialize, JuteError, Serialize, SerializeToBuffer};
 
 pub type OnEvent = dyn Fn(event::Type, event::State, String) + Send + Sync + 'static; // type, state, path
 
@@ -125,7 +125,7 @@ impl Client {
         conn: &TcpStream,
         state: &ProcessState,
         config: &Config,
-    ) -> Result<(), Error> {
+    ) -> Result<(), ClientError> {
         let state = state.inner();
         let req = ConnectRequest {
             protocol_version: 0, // version 0
@@ -143,13 +143,13 @@ impl Client {
     async fn prime_connection_response(
         conn: &mut TcpStream,
         state: &mut ProcessState,
-    ) -> Result<(), Error> {
+    ) -> Result<(), ClientError> {
         let mut frame = conn.read_frame().await?;
         let rsp = ConnectResponse::from_buffer(&mut frame)?;
         let old_id = state.session_id();
         let new_id = rsp.session_id;
         if old_id != 0 && new_id != old_id {
-            Err(anyhow!("Session expired"))
+            Err(ClientError::SessionExpired.into())
         } else {
             state.update_session(&rsp);
             info!(
@@ -212,16 +212,20 @@ impl Client {
     async fn read_response(mut conn: &mut TcpStream) -> Result<Response, Error> {
         // read buffer from socket
         let mut size_buf = [0u8; 4];
-        match conn.read_exact(&mut size_buf).await {
-            Ok(_) => {
-                let mut cursor = io::Cursor::new(size_buf);
-                let size = ReadBytesExt::read_u32::<BigEndian>(&mut cursor).unwrap();
-                let mut buf = BytesMut::with_capacity(size as usize);
-                conn.read_exact(&mut buf).await?;
-                Ok(Response::from_buffer(&mut buf.freeze())?)
-            }
-            Err(e) => Err(e.into()),
-        }
+        conn.read_exact(&mut size_buf).await?;
+
+        let mut cursor = io::Cursor::new(size_buf);
+        let size = ReadBytesExt::read_u32::<BigEndian>(&mut cursor).unwrap();
+        trace!("Reading response, expected {} bytes", size);
+
+        let mut buf = Vec::new();
+        let n = conn.read_to_end(&mut buf).await?;
+        trace!(
+            "Reading response, body have {} bytes, len: {}",
+            n,
+            buf.len()
+        );
+        Response::from_buffer(&mut Bytes::from(buf)).map_err(|e| e.into())
     }
 
     async fn send_all(
@@ -229,10 +233,18 @@ impl Client {
         mut to_send: &mut UnboundedReceiver<Request>,
         mut to_recv: &mut UnboundedSender<Request>,
     ) -> Result<(), Error> {
-        let size = to_send.len();
-        for _ in 0..size {
+        // packet layout:
+        // frame size:   u32 = m + n
+        // frame header: [u8; m] m = 8
+        // frame body:   [u8; n]
+        // --
+
+        for _ in 0..to_send.len() {
             if let Some(req) = to_send.recv().await {
-                let mut buf = req.to_buffer();
+                let req_buf = req.to_buffer();
+                let mut buf = BytesMut::with_capacity(size_of::<u32>() + req_buf.len());
+                buf.put_u32(req_buf.len() as u32);
+                buf.put(req_buf);
                 conn.write_all_buf(&mut buf).await?;
                 to_recv.send(req)?;
             }
@@ -248,7 +260,7 @@ impl Client {
         to_send: &mut UnboundedReceiver<Request>,
         to_recv: &mut UnboundedSender<Request>,
         completion_tx: &mut UnboundedSender<Event>,
-    ) -> Result<(), Error> {
+    ) -> Result<(), ClientError> {
         let Config {
             session_timeout,
             send_session_close_timeout,
@@ -258,6 +270,11 @@ impl Client {
 
         let read_timeout = session_timeout / 3 * 2;
         let write_timeout = session_timeout / 3;
+        trace!(
+            "Read timeout: {:?}, write timeout: {:?}",
+            read_timeout,
+            write_timeout
+        );
 
         // send connection request
         if let Err(e) = Client::prime_connection(&conn, &state, &config).await {
@@ -273,16 +290,41 @@ impl Client {
         let mut interval = tokio::time::interval(write_timeout);
 
         // io loop
+        let mut interest = Interest::WRITABLE;
         loop {
             select! {
                 _ = token.cancelled() => {
                     break;
                 }
 
-                _ = conn.readable() => {
-                    match Self::read_dispatch_response_timeout(&mut conn, read_timeout).await {
-                        Ok(_) => state.update_last_recv(),
-                        Err(e) => error!("Read response failed, {}", e),
+                ready = conn.ready(interest) => {
+                    match ready {
+                        Ok(ready) => {
+                            if ready.is_readable() {
+                                match Self::read_dispatch_response_timeout(&mut conn, read_timeout).await {
+                                    Ok(_) => state.update_last_recv(),
+                                    Err(e) => {
+                                        // connection loss
+                                        error!("Read response failed, last recv: {:?}, {}", state.last_recv(), e);
+                                        break;
+                                    }
+                                }
+                                interest = Interest::WRITABLE;
+                                trace!("read");
+                            } else if ready.is_writable() {
+                                if let Err(e) = time::timeout(write_timeout, Client::send_all(conn, to_send, to_recv)).await? {
+                                    error!("Write failed, {}", e);
+                                } else {
+                                    state.update_last_send();
+                                }
+                                interest = Interest::READABLE;
+                                trace!("written");
+                            }
+                        }
+                        Err(e) => {
+                            trace!("Connection is gone, {}", e);
+                            break;
+                        }
                     }
                 }
 
@@ -290,14 +332,6 @@ impl Client {
                     let now = Instant::now();
                     if now - state.last_send() >= write_timeout {
                         Client::send_ping(&conn).await?;
-                        state.update_last_send();
-                    }
-                }
-
-                _ = conn.writable() => {
-                    if let Err(e) = time::timeout(write_timeout, Client::send_all(conn, to_send, to_recv)).await? {
-                        error!("Write failed, {}", e);
-                    } else {
                         state.update_last_send();
                     }
                 }
@@ -317,7 +351,7 @@ impl Client {
         Ok(())
     }
 
-    async fn send_ping(conn: &TcpStream) -> Result<(), Error> {
+    async fn send_ping(conn: &TcpStream) -> Result<(), ClientError> {
         let req = RequestHeader {
             xid: -2, // TODO replace magic number
             r#type: OpCode::OpPing.into(),
@@ -361,7 +395,13 @@ impl Client {
                             &mut conn, &mut state, config.clone(), token.clone(), &mut to_send, &mut to_recv, &mut completion_tx
                         ).await {
                             Ok(_) => info!("Session closed"),
-                            Err(e) => error!("Process error, {}", e),
+                            Err(e) => {
+                                error!("Process error, {}", e);
+                                if let ClientError::SessionExpired = e {
+                                    token.cancel();
+                                    break;
+                                }
+                            },
                         },
 
                         Err(e) => {
@@ -403,7 +443,7 @@ impl Client {
         Ok(Output::from_buffer(&mut rsp.body.unwrap())?)
     }
 
-    pub async fn close_session(mut conn: &mut TcpStream, xid: i32) -> Result<(), Error> {
+    pub async fn close_session(mut conn: &mut TcpStream, xid: i32) -> Result<(), ClientError> {
         conn.writable().await?;
         let req = Request {
             header: RequestHeader {

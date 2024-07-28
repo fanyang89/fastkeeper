@@ -1,5 +1,6 @@
 use crate::{error::ClientError, messages::proto::ReplyHeader};
 use bytes::{Buf, Bytes};
+use tracing::trace;
 use jute::{Deserialize, JuteError};
 
 #[derive(Debug)]
@@ -14,8 +15,9 @@ impl Deserialize for Response {
         Self: Sized,
     {
         let header = ReplyHeader::from_buffer(&mut buf)?;
-        let size = buf.get_u32() as usize;
-        let body = if let Some(slice) = buf.get(0..size) {
+        trace!("Response header: {:?}", header);
+        // let size = buf.get_u32() as usize;
+        let body = if let Some(slice) = buf.get(0..) {
             let mut x = vec![0u8; slice.len()];
             x[0..].clone_from_slice(slice);
             Some(Bytes::from(x))

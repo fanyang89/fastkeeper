@@ -1,8 +1,8 @@
 use bytes::BufMut;
 use bytes::BytesMut;
-use tokio::sync::oneshot;
-
 use jute::SerializeToBuffer;
+use tokio::sync::oneshot;
+use tracing::{info, trace};
 
 use crate::{
     messages::{proto::RequestHeader, RequestBody},
@@ -18,9 +18,10 @@ pub struct Request {
 impl SerializeToBuffer for Request {
     fn to_buffer(&self) -> BytesMut {
         let mut buf = self.header.to_buffer();
+        trace!("buf len: {}", buf.len());
         if let Some(body) = &self.body {
             let body_buf = body.to_buffer();
-            buf.put_u32(body_buf.len() as u32);
+            trace!("body len: {}", body_buf.len());
             buf.put(body_buf);
         }
         buf.clone()

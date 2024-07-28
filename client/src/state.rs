@@ -23,7 +23,7 @@ impl ProcessState {
                 session_id: 0,
                 passwd: Vec::with_capacity(16),
                 last_send: Instant::now(),
-                last_read: Instant::now(),
+                last_recv: Instant::now(),
                 xid: random::<i32>(),
             })),
         }
@@ -40,7 +40,11 @@ impl ProcessState {
 
     pub fn update_last_recv(&mut self) {
         let mut inner = self.inner.lock().unwrap();
-        inner.last_read = Instant::now();
+        inner.last_recv = Instant::now();
+    }
+
+    pub fn last_recv(&mut self) -> Instant {
+        self.inner.lock().unwrap().last_recv
     }
 
     pub fn last_send(&self) -> Instant {
@@ -75,6 +79,6 @@ pub struct ProcessStateInner {
     pub session_id: i64,
     pub passwd: jute::Buffer,
     pub last_send: Instant,
-    pub last_read: Instant,
+    pub last_recv: Instant,
     pub xid: i32,
 }
