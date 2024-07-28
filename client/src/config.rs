@@ -1,5 +1,5 @@
-use std::time::Duration;
 use crate::hosts::ShuffleMode;
+use std::time::Duration;
 
 #[derive(Clone, Debug)]
 pub struct Config {

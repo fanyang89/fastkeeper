@@ -44,7 +44,7 @@ pub type Buffer = Vec<u8>;
 impl Deserialize for Buffer {
     fn from_buffer(buf: &mut Bytes) -> Result<Self, JuteError> {
         let size: usize = i32::from_buffer(buf)? as usize;
-        Ok(buf.get(0..size).ok_or_else(|| JuteError::Eof)?.to_vec())
+        Ok(buf.get(0..size).ok_or(JuteError::Eof)?.to_vec())
     }
 }
 
