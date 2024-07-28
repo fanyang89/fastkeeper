@@ -1,5 +1,6 @@
+use anyhow::Result;
 use clap::Parser;
-use tracing::info;
+use tracing::{error, info};
 use zookeeper::config::Config;
 use zookeeper::{client::Client, event, messages::proto::GetDataResponse};
 
@@ -17,12 +18,19 @@ fn on_event(event_type: event::Type, state: event::State, path: String) {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), anyhow::Error> {
+async fn main() -> Result<()> {
     let cli = Cli::parse();
     tracing_subscriber::fmt::init();
+
     let config = Config::default();
     let mut conn = Client::new(&cli.hosts, &on_event, config)?;
-    let GetDataResponse { data, stat } = conn.get("/zookeeper/config", false).await?;
-    info!("Config: {:?}, stat: {:?}", data, stat);
+    match conn.get("/zookeeper/config", false).await {
+        Ok(GetDataResponse { data, .. }) => {
+            let s = String::from_utf8(data)?;
+            info!("config: \n{}", s);
+        }
+        Err(e) => error!("Get failed: {}", e),
+    }
+
     Ok(())
 }

@@ -43,7 +43,7 @@ use jute::{Deserialize, JuteError, Serialize, SerializeToBuffer};
 pub type OnEvent = dyn Fn(event::Type, event::State, String) + Send + Sync + 'static; // type, state, path
 
 pub struct Client {
-    runtime: Arc<Runtime>,
+    // runtime: Arc<Runtime>,
     token: CancellationToken,
     req_tx: UnboundedSender<Request>,
     state: ProcessState,
@@ -57,14 +57,14 @@ impl Client {
             return Err(ClientError::InvalidConfig.into());
         }
 
-        let runtime = Arc::new(
-            runtime::Builder::new_multi_thread()
-                .worker_threads(config.worker_threads)
-                .max_blocking_threads(config.max_blocking_threads)
-                .enable_all()
-                .build()
-                .unwrap(),
-        );
+        // let runtime = Arc::new(
+        //     runtime::Builder::new_multi_thread()
+        //         .worker_threads(config.worker_threads)
+        //         .max_blocking_threads(config.max_blocking_threads)
+        //         .enable_all()
+        //         .build()
+        //         .unwrap(),
+        // );
         let token = CancellationToken::new();
         let state = ProcessState::new();
 
@@ -77,8 +77,8 @@ impl Client {
         // send response from task-io to task-completion
         let (rsp_tx, rsp_rx) = mpsc::unbounded_channel::<Response>();
 
-        let completion_task = runtime.spawn(Client::task_completion(
-            runtime.clone(),
+        let completion_task = tokio::spawn(Client::task_completion(
+            // runtime.clone(),
             token.clone(),
             cb,
             config.clone(),
@@ -86,7 +86,7 @@ impl Client {
             wake_rx,
             rsp_rx,
         ));
-        let io_task = runtime.spawn(Client::task_io(
+        let io_task = tokio::spawn(Client::task_io(
             config.clone(),
             state.clone(),
             token.clone(),
@@ -99,7 +99,7 @@ impl Client {
 
         Ok(Client {
             req_tx,
-            runtime,
+            // runtime,
             token,
             state,
             completion_task,
@@ -107,6 +107,7 @@ impl Client {
         })
     }
 
+    #[async_backtrace::framed]
     async fn connect(host: &String) -> Result<TcpStream, Error> {
         let hosts = net::lookup_host(host).await?;
         let addr: SocketAddr = hosts
@@ -115,12 +116,14 @@ impl Client {
         Ok(TcpStream::connect(addr).await?)
     }
 
+    #[async_backtrace::framed]
     async fn connect_timeout(host: &String, timeout: Duration) -> Result<TcpStream, Error> {
         Ok(tokio::time::timeout(timeout, Client::connect(host))
             .await
             .map_err(|_| anyhow!("connect timeout after {}ms", timeout.as_millis()))??)
     }
 
+    #[async_backtrace::framed]
     async fn prime_connection(
         conn: &TcpStream,
         state: &ProcessState,
@@ -140,6 +143,7 @@ impl Client {
         Ok(())
     }
 
+    #[async_backtrace::framed]
     async fn prime_connection_response(
         conn: &mut TcpStream,
         state: &mut ProcessState,
@@ -160,8 +164,9 @@ impl Client {
         }
     }
 
+    #[async_backtrace::framed]
     async fn task_completion(
-        runtime: Arc<Runtime>,
+        // runtime: Arc<Runtime>,
         token: CancellationToken,
         on_event: &'static OnEvent,
         config: Config,
@@ -182,7 +187,7 @@ impl Client {
                 event = event_rx.recv() => {
                     if let Some(e) = event {
                         let now = Instant::now();
-                        runtime.spawn_blocking(|| on_event(e.r#type, e.state, e.path)).await.unwrap();
+                        task::spawn_blocking(|| on_event(e.r#type, e.state, e.path)).await.unwrap();
                         let elapsed = Instant::now() - now;
                         if elapsed > completion_warn_timeout {
                             warn!("Slow callback execution({}ms) detected", completion_warn_timeout.as_millis());
@@ -202,6 +207,7 @@ impl Client {
         info!("Completion task exited");
     }
 
+    #[async_backtrace::framed]
     async fn read_dispatch_response_timeout(
         mut conn: &mut TcpStream,
         timeout: Duration,
@@ -209,25 +215,24 @@ impl Client {
         Ok(tokio::time::timeout(timeout, Client::read_response(&mut conn)).await??)
     }
 
+    #[async_backtrace::framed]
     async fn read_response(mut conn: &mut TcpStream) -> Result<Response, Error> {
         // read buffer from socket
         let mut size_buf = [0u8; 4];
         conn.read_exact(&mut size_buf).await?;
 
         let mut cursor = io::Cursor::new(size_buf);
-        let size = ReadBytesExt::read_u32::<BigEndian>(&mut cursor).unwrap();
+        let size = ReadBytesExt::read_i32::<BigEndian>(&mut cursor).unwrap();
         trace!("Reading response, expected {} bytes", size);
 
-        let mut buf = Vec::new();
-        let n = conn.read_to_end(&mut buf).await?;
-        trace!(
-            "Reading response, body have {} bytes, len: {}",
-            n,
-            buf.len()
-        );
+        let mut buf = vec![0u8; size as usize];
+        let n = conn.read_exact(&mut buf).await? as i32;
+        trace!("Read {} bytes", n);
         Response::from_buffer(&mut Bytes::from(buf)).map_err(|e| e.into())
     }
+    // 100.108.54.61
 
+    #[async_backtrace::framed]
     async fn send_all(
         mut conn: &mut TcpStream,
         mut to_send: &mut UnboundedReceiver<Request>,
@@ -238,20 +243,18 @@ impl Client {
         // frame header: [u8; m] m = 8
         // frame body:   [u8; n]
         // --
-
-        for _ in 0..to_send.len() {
-            if let Some(req) = to_send.recv().await {
-                let req_buf = req.to_buffer();
-                let mut buf = BytesMut::with_capacity(size_of::<u32>() + req_buf.len());
-                buf.put_u32(req_buf.len() as u32);
-                buf.put(req_buf);
-                conn.write_all_buf(&mut buf).await?;
-                to_recv.send(req)?;
-            }
+        if let Some(req) = to_send.recv().await {
+            let req_buf = req.to_buffer();
+            let mut buf = BytesMut::with_capacity(size_of::<u32>() + req_buf.len());
+            buf.put_u32(req_buf.len() as u32);
+            buf.put(req_buf);
+            conn.write_all_buf(&mut buf).await?;
+            to_recv.send(req)?;
         }
         Ok(())
     }
 
+    #[async_backtrace::framed]
     async fn process_loop(
         mut conn: &mut TcpStream,
         state: &mut ProcessState,
@@ -260,6 +263,7 @@ impl Client {
         to_send: &mut UnboundedReceiver<Request>,
         to_recv: &mut UnboundedSender<Request>,
         completion_tx: &mut UnboundedSender<Event>,
+        rsp_tx: &mut UnboundedSender<Response>,
     ) -> Result<(), ClientError> {
         let Config {
             session_timeout,
@@ -301,8 +305,12 @@ impl Client {
                     match ready {
                         Ok(ready) => {
                             if ready.is_readable() {
+                                trace!("is_readable");
                                 match Self::read_dispatch_response_timeout(&mut conn, read_timeout).await {
-                                    Ok(_) => state.update_last_recv(),
+                                    Ok(rsp) => {
+                                        state.update_last_recv();
+                                        rsp_tx.send(rsp);
+                                    },
                                     Err(e) => {
                                         // connection loss
                                         error!("Read response failed, last recv: {:?}, {}", state.last_recv(), e);
@@ -310,15 +318,17 @@ impl Client {
                                     }
                                 }
                                 interest = Interest::WRITABLE;
-                                trace!("read");
+                                trace!("is_readable, done");
                             } else if ready.is_writable() {
+                                // TODO: send ping here
+                                trace!("is_writable");
                                 if let Err(e) = time::timeout(write_timeout, Client::send_all(conn, to_send, to_recv)).await? {
                                     error!("Write failed, {}", e);
                                 } else {
                                     state.update_last_send();
                                 }
                                 interest = Interest::READABLE;
-                                trace!("written");
+                                trace!("is_writable, done");
                             }
                         }
                         Err(e) => {
@@ -339,6 +349,7 @@ impl Client {
         }
 
         // send session close
+        trace!("Closing session");
         time::timeout(
             send_session_close_timeout,
             Self::close_session(conn, state.get_xid()),
@@ -347,10 +358,12 @@ impl Client {
 
         // wait for connection readable
         time::timeout(wait_close_timeout, conn.readable()).await??;
+        trace!("Session closed");
 
         Ok(())
     }
 
+    #[async_backtrace::framed]
     async fn send_ping(conn: &TcpStream) -> Result<(), ClientError> {
         let req = RequestHeader {
             xid: -2, // TODO replace magic number
@@ -361,7 +374,7 @@ impl Client {
         Ok(())
     }
 
-    // io task
+    #[async_backtrace::framed]
     async fn task_io(
         config: Config,
         mut state: ProcessState,
@@ -370,7 +383,7 @@ impl Client {
         mut to_send: UnboundedReceiver<Request>,
         mut to_recv: UnboundedSender<Request>,
         mut completion_tx: UnboundedSender<Event>,
-        rsp_tx: UnboundedSender<Response>,
+        mut rsp_tx: UnboundedSender<Response>,
     ) {
         let Config {
             connect_timeout,
@@ -392,7 +405,7 @@ impl Client {
                 connect_result = Client::connect_timeout(&host, connect_timeout) => {
                     match connect_result {
                         Ok(mut conn) => match Client::process_loop(
-                            &mut conn, &mut state, config.clone(), token.clone(), &mut to_send, &mut to_recv, &mut completion_tx
+                            &mut conn, &mut state, config.clone(), token.clone(), &mut to_send, &mut to_recv, &mut completion_tx, &mut rsp_tx,
                         ).await {
                             Ok(_) => info!("Session closed"),
                             Err(e) => {
@@ -473,23 +486,5 @@ impl Client {
 impl Drop for Client {
     fn drop(&mut self) {
         self.token.cancel();
-    }
-}
-
-impl Client {
-    pub fn spawn<F>(&self, future: F) -> JoinHandle<F::Output>
-    where
-        F: Future + Send + 'static,
-        F::Output: Send + 'static,
-    {
-        self.runtime.spawn(future)
-    }
-
-    pub fn spawn_blocking<F, R>(&self, func: F) -> JoinHandle<R>
-    where
-        F: FnOnce() -> R + Send + 'static,
-        R: Send + 'static,
-    {
-        self.runtime.spawn_blocking(func)
     }
 }

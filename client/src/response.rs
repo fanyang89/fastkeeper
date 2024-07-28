@@ -1,12 +1,23 @@
 use crate::{error::ClientError, messages::proto::ReplyHeader};
 use bytes::{Buf, Bytes};
-use tracing::trace;
 use jute::{Deserialize, JuteError};
+use std::fmt::{Display, Formatter};
+use tracing::trace;
 
 #[derive(Debug)]
 pub struct Response {
     pub header: ReplyHeader,
     pub body: Option<Bytes>,
+}
+
+impl Display for ReplyHeader {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "ReplyHeader {{ xid: {:#x}, zxid: {:#x}, err: {:#x} }}",
+            self.xid, self.zxid, self.err
+        )
+    }
 }
 
 impl Deserialize for Response {
@@ -15,8 +26,7 @@ impl Deserialize for Response {
         Self: Sized,
     {
         let header = ReplyHeader::from_buffer(&mut buf)?;
-        trace!("Response header: {:?}", header);
-        // let size = buf.get_u32() as usize;
+        trace!("Response header: {}", header);
         let body = if let Some(slice) = buf.get(0..) {
             let mut x = vec![0u8; slice.len()];
             x[0..].clone_from_slice(slice);

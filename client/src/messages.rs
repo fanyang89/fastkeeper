@@ -210,6 +210,7 @@ impl From<OpCode> for i32 {
 // module org.apache.zookeeper.data
 pub mod data {
     use jute::jute_message;
+    use std::fmt::{Display, Formatter};
 
     jute_message!(Id {
         scheme: String,
