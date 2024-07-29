@@ -211,8 +211,9 @@ impl Client {
     async fn read_dispatch_response_timeout(
         mut conn: &mut TcpStream,
         timeout: Duration,
-    ) -> Result<Response, Error> {
-        Ok(tokio::time::timeout(timeout, Client::read_response(&mut conn)).await??)
+    ) -> Result<Response, ClientError> {
+        let mut buf = tokio::time::timeout(timeout, conn.read_frame()).await??;
+        Ok(Response::from_buffer(&mut buf)?)
     }
 
     #[async_backtrace::framed]

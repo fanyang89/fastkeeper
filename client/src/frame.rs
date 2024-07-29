@@ -1,10 +1,10 @@
 use std::io;
 
-use crate::error::ClientError;
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use bytes::Bytes;
 use tokio::{io::AsyncReadExt, net::TcpStream};
-use tracing::{info, trace};
+
+use crate::error::ClientError;
 
 pub(crate) trait FrameReadWriter {
     async fn read_frame(&mut self) -> Result<Bytes, ClientError>;
