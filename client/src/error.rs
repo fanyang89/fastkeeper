@@ -1,22 +1,28 @@
 use crate::request::Request;
-use jute::JuteError;
+use std::backtrace::Backtrace;
 use std::io;
+use std::net;
 use std::sync::mpsc;
-use thiserror::Error;
 
-#[derive(Error, Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum ClientError {
     #[error("corrupted response")]
     CorruptedResponse,
 
-    #[error("empty response body")]
-    EmptyResponseBody,
+    #[error("empty body")]
+    EmptyBody,
 
-    #[error("invalid config")]
-    InvalidConfig,
+    #[error("session expired")]
+    SessionExpired,
 
-    #[error("anyhow error, {0}")]
-    UnknownError(anyhow::Error),
+    #[error("empty config")]
+    EmptyHosts,
+
+    #[error("invalid config, {0}")]
+    InvalidConfig(#[from] net::AddrParseError),
+
+    #[error("{0}")]
+    UnknownError(#[from] anyhow::Error),
 
     #[error("request send failed, {0}")]
     SendError(#[from] mpsc::SendError<Request>),
@@ -25,14 +31,11 @@ pub enum ClientError {
     RecvError(#[from] mpsc::RecvError),
 
     #[error("jute error: {0}")]
-    JuteError(#[from] JuteError),
-
-    #[error("session expired")]
-    SessionExpired,
+    JuteError(#[from] jute::JuteError),
 
     #[error("io error, {0}")]
     IoError(#[from] io::Error),
 
-    #[error("timeout {0}")]
+    #[error("timeout, {0}")]
     TimeoutError(#[from] tokio::time::error::Elapsed),
 }

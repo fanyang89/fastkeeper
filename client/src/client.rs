@@ -1,10 +1,10 @@
 use std::fmt::Display;
-use std::future::Future;
-use std::io;
+use std::future::{Future, IntoFuture};
 use std::net::SocketAddr;
 use std::sync::atomic::{self, AtomicI32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use std::{io, thread};
 
 use anyhow::{anyhow, Error};
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
@@ -43,42 +43,26 @@ use jute::{Deserialize, JuteError, Serialize, SerializeToBuffer};
 pub type OnEvent = dyn Fn(event::Type, event::State, String) + Send + Sync + 'static; // type, state, path
 
 pub struct Client {
-    // runtime: Arc<Runtime>,
     token: CancellationToken,
     req_tx: UnboundedSender<Request>,
     state: ProcessState,
-    pub completion_task: JoinHandle<()>,
-    pub io_task: JoinHandle<()>,
+    completion_task: Option<JoinHandle<()>>,
+    io_task: Option<JoinHandle<()>>,
 }
 
 impl Client {
     pub fn new(hosts: &Vec<String>, cb: &'static OnEvent, config: Config) -> Result<Self, Error> {
-        if hosts.is_empty() {
-            return Err(ClientError::InvalidConfig.into());
-        }
+        let host_provider = Hosts::new(hosts.clone(), &config.shuffle_mode)?;
 
-        // let runtime = Arc::new(
-        //     runtime::Builder::new_multi_thread()
-        //         .worker_threads(config.worker_threads)
-        //         .max_blocking_threads(config.max_blocking_threads)
-        //         .enable_all()
-        //         .build()
-        //         .unwrap(),
-        // );
         let token = CancellationToken::new();
         let state = ProcessState::new();
 
-        // send request from guest to task-io
         let (req_tx, req_rx) = mpsc::unbounded_channel::<Request>();
-        // send event from task-io to task-completion
         let (event_tx, event_rx) = mpsc::unbounded_channel::<Event>();
-        // send waker from task-io to task-completion
         let (wake_tx, wake_rx) = mpsc::unbounded_channel::<Request>();
-        // send response from task-io to task-completion
         let (rsp_tx, rsp_rx) = mpsc::unbounded_channel::<Response>();
 
         let completion_task = tokio::spawn(Client::task_completion(
-            // runtime.clone(),
             token.clone(),
             cb,
             config.clone(),
@@ -90,20 +74,18 @@ impl Client {
             config.clone(),
             state.clone(),
             token.clone(),
-            Hosts::new(hosts.clone(), &config.shuffle_mode),
+            host_provider,
             req_rx,
             wake_tx,
             event_tx.clone(),
             rsp_tx,
         ));
-
         Ok(Client {
             req_tx,
-            // runtime,
             token,
             state,
-            completion_task,
-            io_task,
+            completion_task: Some(completion_task),
+            io_task: Some(io_task),
         })
     }
 
@@ -299,6 +281,7 @@ impl Client {
         loop {
             select! {
                 _ = token.cancelled() => {
+                    info!("process_loop cancelled");
                     break;
                 }
 
@@ -310,7 +293,7 @@ impl Client {
                                 match Self::read_dispatch_response_timeout(&mut conn, read_timeout).await {
                                     Ok(rsp) => {
                                         state.update_last_recv();
-                                        rsp_tx.send(rsp);
+                                        rsp_tx.send(rsp).unwrap();
                                     },
                                     Err(e) => {
                                         // connection loss
@@ -336,14 +319,6 @@ impl Client {
                             trace!("Connection is gone, {}", e);
                             break;
                         }
-                    }
-                }
-
-                _ = interval.tick() => {
-                    let now = Instant::now();
-                    if now - state.last_send() >= write_timeout {
-                        Client::send_ping(&conn).await?;
-                        state.update_last_send();
                     }
                 }
             }
@@ -410,7 +385,7 @@ impl Client {
                         ).await {
                             Ok(_) => info!("Session closed"),
                             Err(e) => {
-                                error!("Process error, {}", e);
+                                error!("Process error: {}", e);
                                 if let ClientError::SessionExpired = e {
                                     token.cancel();
                                     break;
@@ -487,5 +462,14 @@ impl Client {
 impl Drop for Client {
     fn drop(&mut self) {
         self.token.cancel();
+        let io_task = std::mem::take(&mut self.io_task).unwrap();
+        let completion_task = std::mem::take(&mut self.completion_task).unwrap();
+        thread::spawn(|| {
+            let rt = Runtime::new().unwrap();
+            rt.block_on(io_task).unwrap();
+            rt.block_on(completion_task).unwrap();
+        })
+        .join()
+        .unwrap();
     }
 }

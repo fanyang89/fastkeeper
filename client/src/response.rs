@@ -41,7 +41,7 @@ impl Deserialize for Response {
 impl Response {
     pub fn get_message<T: Deserialize>(&mut self) -> Result<T, ClientError> {
         match &mut self.body {
-            None => Err(ClientError::EmptyResponseBody),
+            None => Err(ClientError::EmptyBody),
             Some(ref mut buf) => T::from_buffer(buf).map_err(ClientError::JuteError),
         }
     }

@@ -1,4 +1,6 @@
+use crate::error::ClientError;
 use rand::prelude::SliceRandom;
+use std::net::{IpAddr, SocketAddr};
 use std::ops::Add;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -16,7 +18,14 @@ pub struct Hosts {
 }
 
 impl Hosts {
-    pub fn new(mut hosts: Vec<String>, shuffle_mode: &ShuffleMode) -> Self {
+    pub fn new(mut hosts: Vec<String>, shuffle_mode: &ShuffleMode) -> Result<Self, ClientError> {
+        if hosts.is_empty() {
+            return Err(ClientError::EmptyHosts);
+        }
+        for host in hosts.iter() {
+            host.parse::<SocketAddr>().map_err(ClientError::InvalidConfig)?;
+        }
+
         let mut provider = Self {
             hosts,
             next: 0,
@@ -24,7 +33,7 @@ impl Hosts {
             shuffled: false,
         };
         provider.shuffle();
-        provider
+        Ok(provider)
     }
 
     pub fn shuffle(&mut self) {
