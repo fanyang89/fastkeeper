@@ -9,8 +9,7 @@ impl NodeConfig {
     pub fn load(id: u16, name: &str) -> Result<NodeConfig, config::ConfigError> {
         let settings = Config::builder()
             .add_source(config::File::with_name(name))
-            .build()
-            .unwrap();
+            .build()?;
         let s = settings.try_deserialize::<HashMap<String, String>>()?;
         Ok(NodeConfig {})
     }
@@ -39,8 +38,7 @@ impl ClusterConfig {
     pub fn load_str(config_str: &str) -> Result<ClusterConfig, config::ConfigError> {
         let settings = Config::builder()
             .add_source(config::File::from_str(config_str, FileFormat::Toml))
-            .build()
-            .unwrap();
+            .build()?;
         settings.try_deserialize::<ClusterConfig>()
     }
 }

@@ -1,5 +1,5 @@
 use crate::error::BenchError;
-use crate::ConnectOption;
+use crate::cli::ConnectOption;
 use anyhow::Result;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use std::fmt::{Display, Formatter};
